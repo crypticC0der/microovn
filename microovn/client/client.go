@@ -132,3 +132,32 @@ func getOvsdbSchemaVersion(ctx context.Context, c *client.Client, dbSpec *ovnCmd
 
 	return response, types.OvsdbSchemaFetchErrorNone
 }
+
+func DisableService(ctx context.Context, c *client.Client, serviceName string) error {
+	queryCtx, cancel := context.WithTimeout(ctx, time.Second*30)
+	defer cancel()
+
+	err := c.Query(queryCtx, "DELETE", types.APIVersion, api.NewURL().Path("service", serviceName), nil, nil)
+
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Service %s disabled\n",serviceName)
+	return nil
+}
+
+
+
+func EnableService(ctx context.Context, c *client.Client, serviceName string) error {
+	queryCtx, cancel := context.WithTimeout(ctx, time.Second*30)
+	defer cancel()
+
+	err := c.Query(queryCtx, "PUT", types.APIVersion, api.NewURL().Path("service", serviceName), nil, nil)
+
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Service %s enabled\n",serviceName)
+
+	return nil
+}
