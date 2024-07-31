@@ -14,7 +14,7 @@ import (
 	"github.com/canonical/microcluster/state"
 	"github.com/canonical/microovn/microovn/api/types"
 	microovnClient "github.com/canonical/microovn/microovn/client"
-	"github.com/canonical/microovn/microovn/node"
+	"github.com/canonical/microovn/microovn/services"
 	ovnCmd "github.com/canonical/microovn/microovn/ovn/cmd"
 	"github.com/gorilla/mux"
 
@@ -121,7 +121,7 @@ func getAllExpectedSchemaVersions(s *state.State, r *http.Request) response.Resp
 // If the node receives request for Northbound or Southbound DB schema version, but the not is not running
 // these central services, the request will be forwarded to a node that does run them.
 func getActiveSchemaVersion(s *state.State, r *http.Request) response.Response {
-	hasCentral, err := node.HasServiceActive(s, "central")
+	hasCentral, err := services.HasServiceActive(s, "central")
 	if err != nil {
 		logger.Errorf("failed to check if central is active on this node: %s", err)
 		return response.ErrorResponse(500, "Internal Server Error")
@@ -154,7 +154,7 @@ func getActiveSchemaVersion(s *state.State, r *http.Request) response.Response {
 // successful response is returned to the caller.
 // If none of the "central" nodes return non-error message, this function returns response.ErrorResponse with code 500.
 func forwardActiveSchemaVersion(s *state.State, r *http.Request, dbSpec *ovnCmd.OvsdbSpec) response.Response {
-	centralNodes, err := node.FindService(s, "central")
+	centralNodes, err := services.FindService(s, "central")
 	if err != nil {
 		logger.Errorf("failed to find central node: %s", err)
 		return response.ErrorResponse(500, "Internal Server Error")

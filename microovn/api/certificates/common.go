@@ -7,7 +7,7 @@ import (
 	"github.com/canonical/microcluster/state"
 
 	"github.com/canonical/microovn/microovn/api/types"
-	"github.com/canonical/microovn/microovn/node"
+	"github.com/canonical/microovn/microovn/services"
 	"github.com/canonical/microovn/microovn/ovn"
 )
 
@@ -15,13 +15,13 @@ import (
 func enabledOvnServices(s *state.State) ([]string, error) {
 	var enabledServices []string
 
-	hasCentral, err := node.HasServiceActive(s, "central")
+	hasCentral, err := services.HasServiceActive(s, "central")
 	if err != nil {
 		enabledServices = nil
 		err = fmt.Errorf("failed to lookup local services eligible for certificate refresh: %s", err)
 	}
 
-	hasSwitch, err := node.HasServiceActive(s, "switch")
+	hasSwitch, err := services.HasServiceActive(s, "switch")
 	if err != nil {
 		enabledServices = nil
 		err = fmt.Errorf("failed to lookup local services eligible for certificate refresh: %s", err)

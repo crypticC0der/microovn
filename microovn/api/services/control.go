@@ -10,7 +10,7 @@ import (
 	"github.com/canonical/microcluster/state"
 	"github.com/gorilla/mux"
 
-	"github.com/canonical/microovn/microovn/ovn"
+	"github.com/canonical/microovn/microovn/services"
 )
 
 // /1.0/services/service endpoint.
@@ -25,10 +25,10 @@ func enableService(s *state.State, r *http.Request) response.Response {
 	if err != nil {
 		return response.InternalError(err)
 	}
-	if !ovn.CheckValidService(requestedService) {
+	if !services.CheckValidService(requestedService) {
 		return response.InternalError(errors.New("Service does not exist"))
 	}
-	err = ovn.EnableService(s, requestedService)
+	err = services.EnableService(s, requestedService)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -40,10 +40,10 @@ func disableService(s *state.State, r *http.Request) response.Response {
 	if err != nil {
 		return response.InternalError(err)
 	}
-	if !ovn.CheckValidService(requestedService) {
+	if !services.CheckValidService(requestedService) {
 		return response.InternalError(errors.New("Service does not exist"))
 	}
-	err = ovn.DisableService(s, requestedService)
+	err = services.DisableService(s, requestedService)
 	if err != nil {
 		return response.InternalError(err)
 	}

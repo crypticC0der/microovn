@@ -14,7 +14,7 @@ import (
 
 	"github.com/canonical/microovn/microovn/api/types"
 	microovnClient "github.com/canonical/microovn/microovn/client"
-	"github.com/canonical/microovn/microovn/node"
+	"github.com/canonical/microovn/microovn/services"
 	ovnCmd "github.com/canonical/microovn/microovn/ovn/cmd"
 )
 
@@ -109,7 +109,7 @@ func getLiveSchemaStatus(s *state.State, dbSpec *ovnCmd.OvsdbSpec) (schemaStatus
 // a node with "central" service active and the lowest ID is chosen. A node ID is an internal value of a MicroOVN, and
 // it's kept consistent across the cluster via the underlying MicroCluster library.
 func isNodeUpgradeLeader(s *state.State) (bool, error) {
-	membersWithCentral, err := node.FindService(s, "central")
+	membersWithCentral, err := services.FindService(s, "central")
 	if err != nil {
 		return false, fmt.Errorf("failed to determine which member is OVSDB cluster upgrade leader: '%s'", err)
 	}
@@ -199,7 +199,7 @@ func UpgradeCentralDB(s *state.State, dbType ovnCmd.OvsdbType) error {
 		return fmt.Errorf("MicroOVN handles upgrades only for Northbound and Southbound clustered DBs")
 	}
 
-	centralActive, err := node.HasServiceActive(s, "central")
+	centralActive, err := services.HasServiceActive(s, "central")
 	if err != nil {
 		return fmt.Errorf("failed to query local services: %s", err)
 	}

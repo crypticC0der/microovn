@@ -8,9 +8,9 @@ import (
 
 	"github.com/canonical/microcluster/state"
 
-	"github.com/canonical/microovn/microovn/node"
-	ovnCmd "github.com/canonical/microovn/microovn/ovn/cmd"
+	"github.com/canonical/microovn/microovn/services"
 	"github.com/canonical/microovn/microovn/snap"
+	ovnCmd "github.com/canonical/microovn/microovn/ovn/cmd"
 )
 
 // Refresh will update the existing OVN central and OVS switch configs.
@@ -38,12 +38,12 @@ func refresh(s *state.State) error {
 	}
 
 	// Query existing local services.
-	hasCentral, err := node.HasServiceActive(s, "central")
+	hasCentral, err := services.HasServiceActive(s, "central")
 	if err != nil {
 		return err
 	}
 
-	hasSwitch, err := node.HasServiceActive(s, "switch")
+	hasSwitch, err := services.HasServiceActive(s, "switch")
 	if err != nil {
 		return err
 	}
