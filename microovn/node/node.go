@@ -119,7 +119,7 @@ func EnableService(ctx context.Context, s state.State, service types.SrvName, ex
 	case types.SrvChassis:
 		err = joinChassis(ctx, s)
 	case types.SrvBgp:
-		err = bgp.EnableService()
+		err = bgp.EnableService(ctx, s, extraConfig.BgpConfig)
 	default:
 		err = activateService(service, true)
 	}
