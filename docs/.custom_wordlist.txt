@@ -1,11 +1,15 @@
 Datapath
 ECDSA
 ECDH
+BFD
+BGP
 CLI
 CVE
 ESM
+FRR
 Geneve
 IPs
+IPv
 LTS
 LXD
 Livepatch
@@ -29,6 +33,8 @@ Snapcraft
 SSL
 TLS
 UI
+VRF
+VRFs
 VMs
 Virtualization
 YY
