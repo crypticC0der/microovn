@@ -713,29 +713,26 @@ function microovn_lsp_up() {
 #
 # IP address for the LSP/VIF can be optionally provided as LSP_IP argument (in
 # CIDR format). Otherwise it will be automatically generated (along with MAC
-# address) based on integer found after the last ``-`` in CONTAINER which needs
-# to be a numeric value ranging from 0 to 255.
+# address) based on integer found after the last ``-`` in CONTAINER which
+# currently needs to be a value between 0-9.
 function microovn_add_vif() {
     local container=$1; shift
     local ns_name=$1; shift
     local if_name=$1; shift
-    local ls_name=""; if [ "$#" -gt 0 ]; then ls_name="$1"; shift; fi
-    local cidr=""; if [ "$#" -gt 0 ]; then cidr="$1"; shift; fi
-
-    local n
-    n=$(microovn_extract_ctn_n "$container")
-    assert test "$n" -le 255
+    local ls_name=$1; shift
+    local cidr=$1; shift
 
     if [ -z "$ls_name" ]; then
         ls_name="${MICROOVN_PREFIX_LS}-${container}"
     fi
 
     if [ -z "$cidr" ]; then
-        printf -v cidr "10.42.%d.10/24" "$n"
+        cidr="10.42.$n.10/24"
     fi
 
-    local lladdr
-    printf -v lladdr "00:00:02:00:01:%02x" "$n"
+    local n
+    n=$(microovn_extract_ctn_n__ "$container")
+    local lladdr="00:00:02:00:01:0$n"
     local lsp_name="${container}-${ns_name}-${if_name}"
 
     lxc_exec "$container" \
