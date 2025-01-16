@@ -108,6 +108,21 @@ function microovn_bgp_established() {
     grep -A 2 "Hostname: $neighbor$" <<< "$status" | grep "BGP state = Established"
 }
 
+#  microovn_bgp_neighbor_address CONTAINER INTERFACE MIN_INTERVAL MAX_INTERVAL
+#
+# This function sets the lrp router advertisement inrervals to the given min
+# and max. The lrp name is assumed to be lrp-CONTAINER-INTERFACE
+function microovn_lrp_set_ra_interval() {
+    local container=$1; shift
+    local interface=$1; shift
+    local raMin=$1; shift
+    local raMax=$1; shift
+    local lrpName="lrp-$container-$interface"
+
+    lxc_exec "$container" "microovn.ovn-nbctl set Logical_Router_Port $lrpName ipv6_ra_configs:max_interval=$raMax"
+    lxc_exec "$container" "microovn.ovn-nbctl set Logical_Router_Port $lrpName ipv6_ra_configs:min_interval=$raMin"
+}
+
 #  microovn_bgp_neighbor_address CONTAINER VRF NEIGHBOR
 #
 # This function logs into CONTAINER and prints the IP address of

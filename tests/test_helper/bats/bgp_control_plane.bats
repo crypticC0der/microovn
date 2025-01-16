@@ -133,11 +133,21 @@ bgp_unnumbered_peering() {
                 --config ext_connection=$external_connections \
                 --config vrf=$vrf \
                 --config asn=$host_asn"
+
+            microovn_lrp_set_ra_interval "$container" "$OVN_CONTAINER_NET_1_IFACE" "3" "4"
+            if [ "$multi_link" == "yes" ]; then
+                microovn_lrp_set_ra_interval "$container" "$OVN_CONTAINER_NET_2_IFACE" "3" "4"
+            fi
         else
             echo "# Enabling MicroOVN BGP in $container with manual daemon configuration" >&3
             lxc_exec "$container" "microovn enable bgp \
                 --config ext_connection=$external_connections \
                 --config vrf=$vrf"
+
+            microovn_lrp_set_ra_interval "$container" "$OVN_CONTAINER_NET_1_IFACE" "3" "4"
+            if [ "$multi_link" == "yes" ]; then
+                microovn_lrp_set_ra_interval "$container" "$OVN_CONTAINER_NET_2_IFACE" "3" "4"
+            fi
 
             echo "# Manually configuring FRR to start BGP daemon on $bgp_iface_1 (ASN $host_asn)" >&3
             microovn_start_bgp_unnumbered "$container" "$bgp_iface_1" "$host_asn" "$vrf_device"

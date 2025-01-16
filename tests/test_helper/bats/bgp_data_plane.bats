@@ -43,7 +43,10 @@ function ping_ovn_int_network_over_bgp_router() {
         --config vrf=$vrf \
         --config asn=$host_asn"
 
+    microovn_lrp_set_ra_interval "$TEST_CONTAINER" "$OVN_CONTAINER_INT_IFACE" "3" "4"
+
     echo "# ($TEST_CONTAINER) waiting on established BGP with $BGP_PEER" >&3
+
     wait_until "microovn_bgp_established $TEST_CONTAINER $vrf_device $BGP_PEER"
 
     # create VIF that represents VM on the internal OVN network
