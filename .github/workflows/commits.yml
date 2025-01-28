@@ -59,7 +59,7 @@ jobs:
 
       - name: Validate Commit Messages
         run: |
-          echo "${{ steps.get-pr-commits.outputs.commits }}" | jq -r '.[] | .message' | while read -r message; do
+          echo '${{ steps.get-pr-commits.outputs.commits }}' | jq -r '.[] | .message' | while read -r message; do
             subject=$(echo "$message" | head -n 1)
             body=$(echo "$message" | tail -n +2)
 
