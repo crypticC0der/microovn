@@ -543,6 +543,19 @@ function wait_ovsdb_cluster_container_leave() {
     return $rc
 }
 
+# microovn_extract_ctn_n__ CONTAINER
+#
+# Extracts the number from the container suffix
+function microovn_extract_ctn_n__() {
+    local container=$1; shift
+
+    local n=${container##*-}
+    assert test "$n" -ge 0
+    assert test "$n" -le 9
+
+    echo "$n"
+}
+
 # wait_ovsdb_cluster_container_join SERVER_ID CONTROL_PATH DB_NAME TIMEOUT CONTAINER1 [CONTAINER2 ...]
 #
 # Wait until all CONTAINERs confirm that cluster member with SERVER_ID has successfully joined the cluster.
