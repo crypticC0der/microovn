@@ -29,12 +29,17 @@ function install_microovn() {
         for (( i = 0; i < 10; i++ )); do
             if lxc_exec "$container" "for plug in firewall-control \
                                                   hardware-observe \
+                                                  network-observe \
                                                   hugepages-control \
                                                   network-control \
-                                                  hardware-observe \
                                                   openvswitch-support \
                                                   process-control \
                                                   system-trace \
+                                                  netlink-audit \
+                                                  netlink-connector \
+                                                  network \
+                                                  network-bind \
+                                                  devlink-sysfs \
                                                   network-setup-control; do \
                                           sudo snap connect microovn:\$plug;done"; then
                 break

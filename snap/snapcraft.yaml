@@ -11,6 +11,14 @@ description: |-
 
 confinement: strict
 
+plugs:
+  devlink-sysfs:
+    interface: system-files
+    read:
+      - /sys/bus/pci/devices
+      - /sys/class/net
+
+
 slots:
   ovn-certificates:
     interface: content
@@ -40,6 +48,23 @@ hooks:
       - network
       - network-control
 
+      - network-observe
+
+      - network-bind
+      - network-setup-control
+      - hardware-observe
+
+      - firewall-control
+      - process-control
+      - system-trace
+      - openvswitch-support
+      - hugepages-control
+
+      - netlink-audit
+      - netlink-connector
+      - devlink-sysfs
+
+
 apps:
   # Service
   daemon:
@@ -51,7 +76,17 @@ apps:
       - network-control
       - network-setup-control
       - hardware-observe
+
+      - network-observe
+      - firewall-control
+      - hugepages-control
       - openvswitch-support
+      - process-control
+      - system-trace
+
+      - netlink-audit
+      - netlink-connector
+      - devlink-sysfs
     slots:
       - microovn
 
@@ -101,6 +136,11 @@ apps:
       - system-trace
       - hardware-observe
 
+      - network-observe
+      - netlink-audit
+      - netlink-connector
+      - devlink-sysfs
+
   switch:
     command: commands/switch.start
     daemon: simple
@@ -117,11 +157,32 @@ apps:
       - process-control
       - system-trace
 
+      - network-observe
+      - netlink-audit
+      - netlink-connector
+      - devlink-sysfs
+
   # Commands
   microovn:
     command: commands/microovn
     plugs:
       - network
+
+      - network-bind
+      - network-control
+      - network-setup-control
+      - hardware-observe
+
+      - firewall-control
+      - process-control
+      - system-trace
+      - openvswitch-support
+      - hugepages-control
+
+      - network-observe
+      - netlink-audit
+      - netlink-connector
+      - devlink-sysfs
 
   ovn-appctl:
     command: commands/ovn-appctl
@@ -428,30 +489,30 @@ parts:
       - bin/microovnd
       - coverage.env
 
-  docs:
-    plugin: nil
-    source: docs/
-    build-packages:
-      - libpython3-dev
-      - libxml2-dev
-      - libxslt1-dev
-      - make
-      - python3-venv
-      - rustc
-      - cargo
-    override-build: |
-      set -ex
-      make .sphinx/venv || ( cat .sphinx/venv/pip_install.log && exit 1 )
-      make text
-      rm -rf ${CRAFT_PART_INSTALL}/docs/microovn
-      mkdir -p ${CRAFT_PART_INSTALL}/docs
-      cp -pR _build/text ${CRAFT_PART_INSTALL}/docs/microovn
-    stage:
-      # drop doc starter pack boiler plate files
-      - -docs/microovn/help-woke.*
-      - -docs/microovn/readme.txt
-      - -docs/microovn/setup.txt
-      - -docs/microovn/_*
+  # docs:
+  #   plugin: nil
+  #   source: docs/
+  #   build-packages:
+  #     - libpython3-dev
+  #     - libxml2-dev
+  #     - libxslt1-dev
+  #     - make
+  #     - python3-venv
+  #     - rustc
+  #     - cargo
+  #   override-build: |
+  #     set -ex
+  #     make .sphinx/venv || ( cat .sphinx/venv/pip_install.log && exit 1 )
+  #     make text
+  #     rm -rf ${CRAFT_PART_INSTALL}/docs/microovn
+  #     mkdir -p ${CRAFT_PART_INSTALL}/docs
+  #     cp -pR _build/text ${CRAFT_PART_INSTALL}/docs/microovn
+  #   stage:
+  #     # drop doc starter pack boiler plate files
+  #     - -docs/microovn/help-woke.*
+  #     - -docs/microovn/readme.txt
+  #     - -docs/microovn/setup.txt
+  #     - -docs/microovn/_*
 
   wrappers:
     plugin: dump
