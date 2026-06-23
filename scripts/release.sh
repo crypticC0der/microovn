@@ -237,10 +237,6 @@ fi
 echo
 echo "Returning to edge:"
 
-# Insert build-base and grade: devel right after the base statement
-sed -i -E "/^base:.*/a build-base: devel" "$YAML_FILE"
-sed -i -E "s/^grade: stable/grade: devel/" "$YAML_FILE"
-
 echo "-> Unpinning git sources..."
 # Recalculate git line numbers and remove tags
 GIT_LINES=$(grep -n "source-type: git" "$YAML_FILE" | cut -d: -f1 | sort -nr)
@@ -266,7 +262,7 @@ fi
 
 # Commit 2
 git add "$YAML_FILE"
-git commit -m "Prepare for $VERSION: Restore build-base and unpin git sources" --signoff
+git commit -m "Prepare for $VERSION: Unpin git sources" --signoff
 
 echo
 echo "Locally branching:"
