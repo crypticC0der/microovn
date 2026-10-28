@@ -1,0 +1,14 @@
+name: ovs-doca
+summary: Open vSwitch with the DOCA accelerated datapath
+vendor: Canonical Ltd
+grade: stable
+devices:
+  allof:
+    - type: cpu
+      architecture: amd64
+  anyof:
+    - type: pci
+      vendor-id: "0x15b3"
+runtime: ovs-doca
+components:
+  - ovs-doca

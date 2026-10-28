@@ -11,6 +11,16 @@ description: |-
 
 confinement: strict
 
+environment:
+  SNAP_COMPONENTS: /snap/$SNAP_INSTANCE_NAME/components/$SNAP_REVISION
+
+package-repositories:
+  - type: apt
+    architectures: [amd64]
+    url: https://linux.mellanox.com/public/repo/doca/3.5.0/ubuntu26.04/x86_64/
+    priority: always
+    key-id: CAE649B3B3929F8470D4D33BA024F6F0E6D6A281
+
 slots:
   ovn-certificates:
     interface: content
@@ -39,6 +49,12 @@ hooks:
     plugs:
       - network
       - network-control
+      - hardware-observe
+  post-refresh:
+    plugs:
+      - network
+      - network-control
+      - hardware-observe
 
 apps:
   # Service
@@ -178,6 +194,22 @@ apps:
     timer: 02:00~02:30
 
 
+components:
+  ovs:
+    type: standard
+    summary: Open vSwitch with the kernel datapath
+    description: |-
+      The default Open vSwitch build using the in-kernel system datapath.
+      Selected by the MicroOVN inference layer on hosts without an accelerated
+      networking device.
+  ovs-doca:
+    type: standard
+    summary: Open vSwitch with the DOCA accelerated datapath
+    description: |-
+      The NVIDIA DOCA Open vSwitch build, using the accelerated datapath on
+      ConnectX/BlueField hardware. Selected by the MicroOVN inference layer on
+      hosts with a suitable accelerated networking device.
+
 parts:
   # Dependencies
   dqlite:
@@ -255,6 +287,7 @@ parts:
       usr/sbin/: bin/
       usr/lib/: lib/
       usr/share/: share/
+      bin/ovs-vswitchd: (component/ovs)/bin/ovs-vswitchd
     prime:
       - bin/ovn-appctl
       - bin/ovn-controller
@@ -267,16 +300,12 @@ parts:
       - bin/ovs-dpctl
       - bin/ovs-ofctl
       - bin/ovs-vsctl
-      - bin/ovs-vswitchd
       - bin/ovsdb-client
       - bin/ovsdb-server
       - bin/ovsdb-tool
         # The lib cherry-picking is unfortunately necessary to avoid pulling in
         # external symlinks provided by the openssl package dependency.
         # (External symlinks, i.e. pointing at something in /, are not allowed.)
-      - lib/*/librte_*.so*
-      - lib/*/libethdev.so*
-      - lib/*/libvhost.so*
       - lib/*/libevent-2.1.so*
       - lib/*/libnuma.so.*
       - lib/*/bpf/*
@@ -292,6 +321,36 @@ parts:
         if [ -f "${CRAFT_PART_INSTALL}/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk" ]; then
             mv "${CRAFT_PART_INSTALL}/usr/lib/openvswitch-switch-dpdk/ovs-vswitchd-dpdk" "${CRAFT_PART_INSTALL}/bin/ovs-vswitchd-dpdk"
         fi
+
+  # DOCA Open vSwitch component. This part stages the NVIDIA DOCA build of OVS
+  # from the Mellanox package repository and places its vswitchd and accelerated
+  # libraries into the ovs-doca component, which the inference layer installs on
+  # hosts with a suitable ConnectX/BlueField device.
+  ovs-doca:
+    plugin: nil
+    stage-packages:
+      - to amd64:
+        - doca-openvswitch-switch
+    organize:
+      usr/lib/openvswitch-switch/ovs-vswitchd: (component/ovs-doca)/bin/ovs-vswitchd
+      usr/lib/*/libmlx5.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libibverbs.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libnvhws.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libjansson.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libunwind.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libpcap.so*: (component/ovs-doca)/lib/
+    prime:
+      # Only the files organised into the component are shipped; everything
+      # else staged by this part is excluded from the main snap payload.
+      - -*
+    override-pull: &amd64-only |
+      if [ "${CRAFT_ARCH_BUILD_FOR}" != "amd64" ]; then
+        exit 0
+      fi
+      craftctl default
+    override-build: *amd64-only
+    override-stage: *amd64-only
+    override-prime: *amd64-only
 
   # Main part
   microovn:
@@ -439,6 +498,12 @@ parts:
       - -docs/microovn/readme.txt
       - -docs/microovn/setup.txt
       - -docs/microovn/_*
+
+  engines:
+    plugin: dump
+    source: engines/
+    organize:
+      "*": engines/
 
   wrappers:
     plugin: dump

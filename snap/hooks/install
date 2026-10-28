@@ -30,3 +30,7 @@ mkdir -p "$SNAP_COMMON/run/bird"
 
 # Seed default config files for Bird routing daemon
 cp -r --update=none "$SNAP/etc/bird/bird.conf" "$bird_data_dir"
+
+# Select and install the most suitable Open vSwitch engine for this host.
+# Fall back to the generic engine when hardware information is unavailable.
+"${SNAP}/bin/microovn" inference auto --fallback ovs || true

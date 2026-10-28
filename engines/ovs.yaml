@@ -1,0 +1,13 @@
+name: ovs
+summary: Open vSwitch with the kernel datapath
+vendor: Canonical Ltd
+grade: stable
+devices:
+  anyof:
+    - type: cpu
+      architecture: amd64
+    - type: cpu
+      architecture: arm64
+runtime: ovs
+components:
+  - ovs

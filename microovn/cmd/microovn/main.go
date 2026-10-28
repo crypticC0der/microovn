@@ -85,6 +85,9 @@ func main() {
 	var cmdSetup = cmdSetup{common: &commonCmd}
 	app.AddCommand(cmdSetup.Command())
 
+	var cmdInference = cmdInference{common: &commonCmd}
+	app.AddCommand(cmdInference.Command())
+
 	app.InitDefaultHelpCmd()
 
 	exitCode := commandExitCode(app.Execute(), commonCmd.ExitCode)

@@ -141,3 +141,13 @@ func Services(ctx context.Context) (io.Reader, error) {
 
 	return strings.NewReader(output), nil
 }
+
+// InstallComponent installs a component of the MicroOVN snap via snapctl.
+func InstallComponent(ctx context.Context, component string) error {
+	_, err := shared.RunCommand(ctx, "snapctl", "install", "+"+component)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}

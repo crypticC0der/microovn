@@ -108,6 +108,21 @@ func EnvDir() string {
 	return filepath.Join(dataDir, "env")
 }
 
+// EnginesDir returns path to the directory that stores OVS engine manifests.
+func EnginesDir() string {
+	return filepath.Join(snapRoot, "engines")
+}
+
+// InferenceDir returns path to the directory that stores engine selection state.
+func InferenceDir() string {
+	return filepath.Join(dataDir, "inference")
+}
+
+// ActiveEngineFile returns path to the file recording the currently active engine.
+func ActiveEngineFile() string {
+	return filepath.Join(InferenceDir(), "active")
+}
+
 // PkiCaCertFile returns path to CA certificate file
 func PkiCaCertFile() string {
 	return filepath.Join(PkiDir(), "cacert.pem")
@@ -188,6 +203,7 @@ func RequiredDirs() []string {
 		LogsDir(),
 		PkiDir(),
 		EnvDir(),
+		InferenceDir(),
 		BirdConfigDir(),
 	}
 }

@@ -3,6 +3,16 @@ set -eu
 
 . "${SNAP}/ovn.env"
 
+# Prefer the ovs-vswitchd and libraries provided by the engine selected for
+# this host. The engine is recorded by `microovn inference auto` during
+# install/refresh.
+active_engine="$(cat "${SNAP_COMMON}/data/inference/active" 2>/dev/null || true)"
+if [ -n "${active_engine}" ]; then
+    components_dir="${SNAP_COMPONENTS:-/snap/${SNAP_INSTANCE_NAME}/components/${SNAP_REVISION}}"
+    export PATH="${components_dir}/${active_engine}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${components_dir}/${active_engine}/lib:${LD_LIBRARY_PATH:-}"
+fi
+
 # Setup directories
 export OVS_LOGDIR="${SNAP_COMMON}/logs"
 export OVS_SYSCONFDIR="${SNAP_COMMON}/data/switch"
