@@ -17,9 +17,8 @@ environment:
 package-repositories:
   - type: apt
     architectures: [amd64]
-    url: https://linux.mellanox.com/public/repo/doca/3.5.0/ubuntu26.04/x86_64/
-    priority: always
-    key-id: CAE649B3B3929F8470D4D33BA024F6F0E6D6A281
+    url: http://linux.mellanox.com/public/repo/doca/3.5.0/ubuntu26.04/x86_64/
+    key-id: 70454E6BF5D9C2D3B78709E8DC726C5E41B9CC50
 
 slots:
   ovn-certificates:
@@ -139,6 +138,7 @@ apps:
     command: commands/microovn
     plugs:
       - network
+      - hardware-observe
 
   ovn-appctl:
     command: commands/ovn-appctl
@@ -331,6 +331,10 @@ parts:
     stage-packages:
       - to amd64:
         - doca-openvswitch-switch
+        - collectx-clxapi
+        - libnuma1
+        - libibumad3
+        - libibmad5
     organize:
       usr/lib/openvswitch-switch/ovs-vswitchd: (component/ovs-doca)/bin/ovs-vswitchd
       usr/lib/*/libmlx5.so*: (component/ovs-doca)/lib/
@@ -339,10 +343,31 @@ parts:
       usr/lib/*/libjansson.so*: (component/ovs-doca)/lib/
       usr/lib/*/libunwind.so*: (component/ovs-doca)/lib/
       usr/lib/*/libpcap.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libnuma.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libibumad.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libibmad.so*: (component/ovs-doca)/lib/
+      opt/mellanox/collectx/lib/libclx_api.so*: (component/ovs-doca)/lib/
+      opt/mellanox/collectx/lib/libclx_grpc.so*: (component/ovs-doca)/lib/
+      opt/mellanox/collectx/lib/exporters/*: (component/ovs-doca)/lib/exporters/
+      # libcurl closure — libclx_api links libcurl.so.4, and core26 has neither
+      # libcurl nor most of its transitive deps (these are already staged via
+      # collectx-clxapi, but must be organised into the component to be shipped).
+      usr/lib/*/libcurl.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libnghttp2.so*: (component/ovs-doca)/lib/
+      usr/lib/*/librtmp.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libssh2.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libpsl.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libldap.so*: (component/ovs-doca)/lib/
+      usr/lib/*/liblber.so*: (component/ovs-doca)/lib/
+      usr/lib/*/libsasl2.so*: (component/ovs-doca)/lib/
     prime:
       # Only the files organised into the component are shipped; everything
       # else staged by this part is excluded from the main snap payload.
       - -*
+    stage:
+      # The DOCA openvswitch packages ship their own init/default files that
+      # collide with the Ubuntu openvswitch-switch staged by the `ovn` part.
+      - -etc/*
     override-pull: &amd64-only |
       if [ "${CRAFT_ARCH_BUILD_FOR}" != "amd64" ]; then
         exit 0
