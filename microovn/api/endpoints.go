@@ -36,6 +36,7 @@ var Server = map[string]microTypes.Server{
 					config.ConfigEndoint,
 					bgpapi.BgpSetupEndpoint,
 					bgpapi.BgpCheckInterfaceEndpoint,
+					bgpapi.BgpBirdEndpoint,
 				},
 			},
 		},

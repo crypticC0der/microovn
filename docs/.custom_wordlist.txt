@@ -110,6 +110,7 @@ plaintext
 reST
 reStructuredText
 readthedocs
+reconciler
 schemas
 shellcheck
 snapcraft
@@ -125,3 +126,18 @@ vSwitch
 yaml
 stdin
 standalone
+BIRD
+ToR
+eBGP
+IDL
+LRP
+LRP's
+Neutron
+resync
+responder
+Sunbeam
+misclassifies
+RAs
+subnet
+uplink
+uplinks

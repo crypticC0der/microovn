@@ -17,5 +17,8 @@ func (c *cmdSetup) Command() *cobra.Command {
 	var cmdSetupBgp = cmdSetupBgp{common: c.common}
 	cmd.AddCommand(cmdSetupBgp.Command())
 
+	var cmdSetupBird = cmdSetupBird{common: c.common}
+	cmd.AddCommand(cmdSetupBird.Command())
+
 	return cmd
 }

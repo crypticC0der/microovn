@@ -9,6 +9,7 @@ import (
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/logger"
 
+	"github.com/canonical/microovn/microovn/bgp"
 	"github.com/canonical/microovn/microovn/node"
 	ovnCluster "github.com/canonical/microovn/microovn/ovn/cluster"
 	ovnCmd "github.com/canonical/microovn/microovn/ovn/cmd"
@@ -27,6 +28,13 @@ func Start(ctx context.Context, s microTypes.State) error {
 		"MicroOVN daemon starting on '%s'",
 		s.Name(),
 	)
+
+	// Start the BGP attach reconciler first, before any early return below: the
+	// loop tolerates a closed DB (switchServiceActive returns false on error),
+	// and OnStart only runs once per process, so this is the one reliable place
+	// to guarantee the reconciler exists after a restart.
+	bgp.StartReconciler(s)
+
 	// Skip if the database isn't ready.
 	err := s.Database().IsOpen(ctx)
 	if err != nil {
