@@ -77,6 +77,43 @@ EOF
     } | lxc_exec "$container" "vtysh"
 }
 
+# frr_start_bgp_numbered CONTAINER ASN IFACE LOCAL_CIDR PEER_IP
+#
+# Assign LOCAL_CIDR (e.g. 10.0.0.2/30) to IFACE on the CONTAINER and start a
+# *numbered* IPv4 eBGP session toward PEER_IP (e.g. 10.0.0.1) with BFD, so a
+# numbered attach uplink has a real IPv4 neighbour. Mirrors
+# frr_start_bgp_unnumbered but peers by address instead of interface.
+function frr_start_bgp_numbered() {
+    local container=$1; shift
+    local asn=$1; shift
+    local iface=$1; shift
+    local local_cidr=$1; shift
+    local peer_ip=$1; shift
+
+    lxc_exec "$container" "ip addr add $local_cidr dev $iface" || true
+    {
+        cat <<EOF
+configure
+!
+ip prefix-list accept-all seq 5 permit any
+ipv6 prefix-list accept-all seq 5 permit any
+!
+router bgp $asn
+EOF
+        cat <<EOF
+ neighbor $peer_ip remote-as external
+ neighbor $peer_ip bfd
+!
+ address-family ipv4 unicast
+  neighbor $peer_ip default-originate
+  neighbor $peer_ip soft-reconfiguration inbound
+  neighbor $peer_ip prefix-list accept-all in
+ exit-address-family
+!
+EOF
+    } | lxc_exec "$container" "vtysh"
+}
+
 # generate_router_id STRING
 #
 # generates a random router id in the range 10.0.0.1 - 10.255.255.254 using
