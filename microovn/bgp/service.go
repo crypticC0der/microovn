@@ -127,7 +127,18 @@ func EnableService(ctx context.Context, s microTypes.State, extraConfig *types.E
 		}
 	}
 
-	err := snap.Start(ctx, BirdService, true)
+	// Mutual exclusion: attach mode and managed (own-topology) BGP must not both
+	// drive a node. Refuse to start the managed path while attach is active, and
+	// fail closed on an NB read error so a blip never causes both to run at once.
+	attachActive, err := HasAttach(ctx, s)
+	if err != nil {
+		return fmt.Errorf("failed to check whether BGP attach mode is active: %v", err)
+	}
+	if attachActive {
+		return errors.New("BGP attach mode is active; disable it before enabling managed BGP")
+	}
+
+	err = snap.Start(ctx, BirdService, true)
 	if err != nil {
 		logging.Errorf("Failed to start %s service: %s", BirdService, err)
 		err = errors.New("failed to start BGP service")
@@ -266,4 +277,21 @@ func configureBirdBgp(ctx context.Context, s microTypes.State, bridges []types.B
 		return fmt.Errorf("failed to apply Bird configuration: %w: %s", err, out)
 	}
 	return err
+}
+
+// SetupBirdConfig applies a raw BIRD configuration supplied by the operator
+// (the `microovn setup bird` command). It validates the config with `bird -p`,
+// writes it, starts BIRD and reloads it. It is refused while attach mode is
+// active, because the reconciler would overwrite the raw config on the next
+// tick.
+func SetupBirdConfig(ctx context.Context, s microTypes.State, rawConfig string) error {
+	attachActive, err := HasAttach(ctx, s)
+	if err != nil {
+		return fmt.Errorf("failed to check whether BGP attach mode is active: %v", err)
+	}
+	if attachActive {
+		return errors.New("BGP attach mode is active; configure BIRD via the attach markers instead of setup bird")
+	}
+
+	return applyBirdConfig(ctx, s, rawConfig)
 }

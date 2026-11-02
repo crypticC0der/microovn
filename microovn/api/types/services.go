@@ -4,6 +4,7 @@ package types
 import (
 	"fmt"
 	"log"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -136,6 +137,72 @@ type ExtraBgpConfig struct {
 	// ManualBgpdConfig if set, skips automatic BIRD daemon configuration, allowing manual BGP daemon configuration.
 	// This was the former default behavior when no ASN was provided
 	ManualBgpdConfig bool `json:"manual_bgpd_config,omitempty" yaml:"manual_bgpd_config,omitempty"`
+}
+
+// Peer identifies an eBGP session on an attach uplink. On an unnumbered uplink
+// (the LRP carries no IPv4 in `networks` for the peer) Address is the peer's
+// IPv6 link-local unicast address; on a numbered uplink (the LRP's `networks`
+// holds the transit IPv4) Address is the peer's IPv4 address within that
+// transit prefix. Numbered vs unnumbered is derived from the peer family and
+// the LRP's networks — there is no dedicated marker key.
+type Peer struct {
+	// ASN is the peer's autonomous system number. It must be non-zero and
+	// distinct from the local ASN.
+	ASN uint32 `json:"asn" yaml:"asn"`
+	// Address is the peer's IPv6 link-local unicast address (unnumbered) or
+	// IPv4 transit address (numbered).
+	Address string `json:"address" yaml:"address"`
+}
+
+// validPeerAddr reports whether addr is a syntactically legal eBGP peer
+// address: an IPv6 link-local unicast (unnumbered) or an IPv4 unicast that is
+// not unspecified, limited-broadcast, multicast, loopback or link-local.
+// Whether an IPv4 peer is truly *in* the LRP's transit prefix is checked at
+// attach resolution time, where the prefix is known; reserved-but-unicast
+// ranges (e.g. 100.64/10, 240/4) are the owner's namespace and are left to that
+// containment check.
+func validPeerAddr(ip netip.Addr) bool {
+	if ip.Zone() != "" {
+		return false
+	}
+	if ip.Is6() {
+		return ip.IsLinkLocalUnicast()
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	return ip.As4() != [4]byte{255, 255, 255, 255}
+}
+
+// ParsePeers parses a comma separated list of "<asn>@<addr>" peer entries,
+// where addr is an IPv4 transit or IPv6 link-local unicast address.
+func ParsePeers(raw string) ([]Peer, error) {
+	var peers []Peer
+	seen := map[string]bool{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		asnStr, addr, ok := strings.Cut(entry, "@")
+		if !ok {
+			return nil, fmt.Errorf("peer %q must be in format <asn>@<address>", entry)
+		}
+		asn, err := strconv.ParseUint(strings.TrimSpace(asnStr), 10, 32)
+		if err != nil || asn == 0 {
+			return nil, fmt.Errorf("peer %q has invalid ASN", entry)
+		}
+		ip, err := netip.ParseAddr(strings.TrimSpace(addr))
+		if err != nil || !validPeerAddr(ip) {
+			return nil, fmt.Errorf("peer %q has invalid address (expected IPv4 transit or IPv6 link-local)", entry)
+		}
+		if seen[ip.String()] {
+			return nil, fmt.Errorf("duplicate peer address %s", ip.String())
+		}
+		seen[ip.String()] = true
+		peers = append(peers, Peer{ASN: uint32(asn), Address: ip.String()})
+	}
+	return peers, nil
 }
 
 // BgpExternalConnection represents a parsed structure from ExtraBgpConfig.ExternalConnection string.

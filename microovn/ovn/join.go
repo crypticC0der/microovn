@@ -10,6 +10,7 @@ import (
 
 	bgpapi "github.com/canonical/microovn/microovn/api/bgp"
 	"github.com/canonical/microovn/microovn/api/types"
+	"github.com/canonical/microovn/microovn/bgp"
 	"github.com/canonical/microovn/microovn/config"
 	"github.com/canonical/microovn/microovn/database"
 	"github.com/canonical/microovn/microovn/node"
@@ -186,6 +187,10 @@ func Join(ctx context.Context, s microTypes.State, initConfig map[string]string)
 			return fmt.Errorf("failed to enable BGP on joining node: %w", err)
 		}
 	}
+
+	// Start the attach reconciler (once) here too: OnStart may have returned
+	// early before the cluster DB was open on a freshly joined node.
+	bgp.StartReconciler(s)
 
 	securitylog.Log(
 		securitylog.CatAuthz,

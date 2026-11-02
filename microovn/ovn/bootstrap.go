@@ -10,6 +10,7 @@ import (
 
 	bgpapi "github.com/canonical/microovn/microovn/api/bgp"
 	"github.com/canonical/microovn/microovn/api/types"
+	"github.com/canonical/microovn/microovn/bgp"
 	"github.com/canonical/microovn/microovn/node"
 	"github.com/canonical/microovn/microovn/ovn/certificates"
 	ovnCluster "github.com/canonical/microovn/microovn/ovn/cluster"
@@ -171,6 +172,11 @@ func Bootstrap(ctx context.Context, s microTypes.State, initConfig map[string]st
 	if err != nil {
 		return fmt.Errorf("failed to enable BGP from OVS external IDs: %w", err)
 	}
+
+	// The attach reconciler is started (once) here too: OnStart may have run
+	// before the cluster DB was open on a freshly bootstrapped node, in which
+	// case it returned early and never started the reconciler.
+	bgp.StartReconciler(s)
 
 	return nil
 }
