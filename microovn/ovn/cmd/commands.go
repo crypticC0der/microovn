@@ -227,7 +227,7 @@ func NBCtlCluster(ctx context.Context, s microTypes.State, connectTimeout int, a
 	var err error
 	err = WaitForClusterDBState(ctx, s, "OVN_Northbound", OvsdbConnected, 6641, connectTimeout)
 	if err != nil {
-		return "", errors.New("failed to connect to OVN Northbound database cluster")
+		return "", fmt.Errorf("failed to connect to OVN Northbound database cluster: %w", err)
 	}
 
 	// try command 3 times if it is failing

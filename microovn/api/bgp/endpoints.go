@@ -31,6 +31,13 @@ var BgpCheckInterfaceEndpoint = microTypes.Endpoint{
 	Get:  microTypes.EndpointAction{Handler: checkInterfaceHandler, AllowUntrusted: false, ProxyTarget: true},
 }
 
+// BgpBirdEndpoint allows an operator to push a raw BIRD configuration
+// (`microovn setup bird`). It is node-local and fire-and-forget.
+var BgpBirdEndpoint = microTypes.Endpoint{
+	Path: "bgp/bird",
+	Post: microTypes.EndpointAction{Handler: setupBirdHandler, AllowUntrusted: false, ProxyTarget: true},
+}
+
 func setupBgpHandler(s microTypes.State, r *http.Request) microTypes.Response {
 	resp := types.SetupBgpResponse{}
 
@@ -167,6 +174,28 @@ func checkInterfaceHandler(s microTypes.State, r *http.Request) microTypes.Respo
 func interfaceExists(name string) bool {
 	_, err := os.Stat(fmt.Sprintf("/sys/class/net/%s", name))
 	return err == nil
+}
+
+func setupBirdHandler(s microTypes.State, r *http.Request) microTypes.Response {
+	resp := types.SetupBirdResponse{}
+
+	if !microTypes.IsNotification(r) {
+		var req types.SetupBirdRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return microTypes.BadRequest(errors.New("failed to decode request body"))
+		}
+		if strings.TrimSpace(req.Config) == "" {
+			return microTypes.BadRequest(errors.New("missing BIRD configuration"))
+		}
+
+		if err := bgp.SetupBirdConfig(r.Context(), s, req.Config); err != nil {
+			return microTypes.SmartError(fmt.Errorf("failed to apply BIRD configuration: %w", err))
+		}
+	}
+
+	resp.Success = true
+	resp.Message = "BIRD configuration applied"
+	return microTypes.SyncResponse(true, &resp)
 }
 
 func CheckBgpInterfaceFromClusterConfig(ctx context.Context, s microTypes.State) error {

@@ -4,6 +4,7 @@ package types
 import (
 	"fmt"
 	"log"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -136,6 +137,45 @@ type ExtraBgpConfig struct {
 	// ManualBgpdConfig if set, skips automatic BIRD daemon configuration, allowing manual BGP daemon configuration.
 	// This was the former default behavior when no ASN was provided
 	ManualBgpdConfig bool `json:"manual_bgpd_config,omitempty" yaml:"manual_bgpd_config,omitempty"`
+}
+
+// Peer identifies an IPv6 link-local eBGP session on an uplink (attach mode).
+type Peer struct {
+	// ASN is the peer's autonomous system number. It must be non-zero and
+	// distinct from the local ASN.
+	ASN uint32 `json:"asn" yaml:"asn"`
+	// Address is the peer's IPv6 link-local unicast address.
+	Address string `json:"address" yaml:"address"`
+}
+
+// ParsePeers parses a comma separated list of "<asn>@<ll-addr>" peer entries.
+func ParsePeers(raw string) ([]Peer, error) {
+	var peers []Peer
+	seen := map[string]bool{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		asnStr, addr, ok := strings.Cut(entry, "@")
+		if !ok {
+			return nil, fmt.Errorf("peer %q must be in format <asn>@<address>", entry)
+		}
+		asn, err := strconv.ParseUint(strings.TrimSpace(asnStr), 10, 32)
+		if err != nil || asn == 0 {
+			return nil, fmt.Errorf("peer %q has invalid ASN", entry)
+		}
+		ip, err := netip.ParseAddr(strings.TrimSpace(addr))
+		if err != nil || !ip.Is6() || !ip.IsLinkLocalUnicast() || ip.Zone() != "" {
+			return nil, fmt.Errorf("peer %q has invalid IPv6 link-local address", entry)
+		}
+		if seen[ip.String()] {
+			return nil, fmt.Errorf("duplicate peer address %s", ip.String())
+		}
+		seen[ip.String()] = true
+		peers = append(peers, Peer{ASN: uint32(asn), Address: ip.String()})
+	}
+	return peers, nil
 }
 
 // BgpExternalConnection represents a parsed structure from ExtraBgpConfig.ExternalConnection string.

@@ -176,6 +176,133 @@ With this flag, MicroOVN won't configure the built-in
 BIRD daemon, Allowing you to perform manual configuration or use entirely
 different BGP daemon.
 
+Attach mode (externally owned routers)
+--------------------------------------
+
+When the deployment already has a component that owns the OVN topology —
+OpenStack Neutron, Sunbeam or MicroCloud — MicroOVN's regular BGP setup would
+collide with it, because it creates its own logical routers and switches.
+Instead, MicroOVN can *attach* BIRD to an existing logical router port that the
+topology owner created, via OVN's native ``options:routing-protocol-redirect``,
+without owning any L2/L3 topology of its own.
+
+Attach mode is driven by two external-id markers:
+
+- ``microovn-bgp=enabled`` on ``Open_vSwitch`` is the chassis-wide enable gate.
+- ``microovn-bgp-attach=true`` on a ``Logical_Router_Port`` marks that port as an
+  attachment point.
+
+MicroOVN records which ports it has attached to in a single local
+``Open_vSwitch`` external-id: ``microovn-bgp-attached`` holds a comma-separated
+list of logical-router-port names. This journal lives in MicroOVN's own OVS DB
+(not the NB), so it survives a topology owner rewriting NB ``external_ids`` and
+is inherently chassis-scoped.
+
+The chassis-wide knobs live on ``Open_vSwitch`` ``external_ids``:
+
+- ``microovn-bgp-asn`` — local ASN (optional; auto-generated from the cluster
+  member ID when absent).
+- ``microovn-bgp-router-id`` — BIRD router id (optional; auto-generated).
+- ``microovn-bgp-advertise-table`` — the kernel table the topology owner /
+  BGP producer populates with chassis-local ``/32`` host routes (with a kernel
+  metric) that BIRD advertises out. **Required** in attach mode; it is never
+  auto-generated because a table nobody writes to would silently advertise
+  nothing.
+
+Per-port configuration lives on the tagged ``Logical_Router_Port``
+``external_ids``:
+
+- ``microovn-bgp-peers`` — comma-separated ``<asn>@<link-local-address>`` eBGP
+  peers.
+
+Owner contract
+~~~~~~~~~~~~~~
+
+The topology owner remains responsible for the router, switch, ports and the
+provider bridge. Before stamping ``microovn-bgp-attach=true``, the owner must
+have configured:
+
+- the router pinned to the local chassis (``options:chassis=<chassis>``),
+- ``options:dynamic-routing=true`` and ``options:dynamic-routing-vrf-id=<id>``
+  on the router (or, if ``-vrf-id`` is absent, ``dynamic-routing=true`` alone —
+  MicroOVN will read the effective id from the router's datapath),
+- an explicit MAC (not ``auto``) on the LRP,
+- ``options:dynamic-routing-maintain-vrf=true`` on the LRP (this is what makes
+  ``ovn-controller`` create the ``ovnvrf<N>`` device on the chassis),
+- a ``options:dynamic-routing-port-name=<name>`` on the LRP, unique across the
+  local chassis (pinned ports on other chassis may reuse the name, since the
+  ``dynamic-routing-port-mapping`` it keys is chassis-local).
+
+MicroOVN then attaches BIRD: it creates a veth pair, adds the OVS side to
+``br-int``, records the port in ``Open_vSwitch``'s
+``dynamic-routing-port-mapping``, adds a redirect LSP on the owner's switch, and
+sets ``routing-protocol-redirect`` on the LRP. While attached it sets the LRP's
+``routing-protocols`` to ``BGP,BFD`` (mirroring the managed/redirect path) so OVN
+redirects both BGP and BFD to the attachment veth; the attach BIRD config carries
+a passive BFD listener, so BFD is only used when a peer has it configured and
+peers that do not speak BFD are unaffected. BFD is applied to every attached peer
+with no per-peer opt-out — this is deliberate: BIRD answers passively, so a peer
+without BFD simply never establishes a session, while a BFD-capable peer gets fast
+failure detection. The periodic IPv6 RA options
+(``send_periodic``, ``address_mode``, ``max_interval``, ``min_interval``) are set
+to fixed values for unnumbered BGP and override the owner's. The owner's original
+``routing-protocols`` and RA values are recorded and restored on detach. Those
+edits are permanent while the attachment is active; the owner should not modify
+or delete the redirect LSP. If the owner rewrites ``routing-protocols``
+mid-attachment (e.g. drops BFD, or the node upgrades from a pre-BFD MicroOVN), the
+reconciler re-stamps it to ``BGP,BFD`` on the next convergence check — otherwise
+BFD is never redirected to the veth and fast failure detection silently does not
+work for a redundant fabric that expects it. The reconciler does not repair drift
+in the RA keys.
+
+If the owner also runs OVN-managed BFD on the same LRP (an NB ``BFD`` row), the
+``BGP,BFD`` stamp still coexists: on OVN 26.03+ an owner's BFD traffic is cloned
+to the router pipeline rather than stolen, so an owner BFD session is preserved
+alongside the redirected one. Below 26.03 the redirect would instead steal an
+owner's OVN BFD traffic, but attach never runs against a central older than 26.03
+— the reconciler skips it with a warning — so that case is unreachable. This
+dual-responder configuration is not tested; prefer letting MicroOVN's redirected
+BFD be the only speaker on an attached LRP.
+
+BFD failure detection is sub-second, so live attachments are sensitive to the LRP
+``options`` and to datapath interruptions. The attach template leaves BFD at its
+defaults (BIRD's own are ``min-rx 10ms`` / ``min-tx 100ms`` / multiplier 5);
+the actual
+detect time is negotiated from *both* ends' advertised intervals and multiplier —
+a typical peer such as FRR defaults to 300ms x 3, i.e. roughly a second. If the
+owner rewrites ``routing-protocols``/``routing-protocol-redirect`` mid-attachment,
+or the datapath stalls for longer than the detect time (an ``ovn-controller``/OVS
+restart, a snap refresh, or any other OVS/``vswitchd`` restart or component
+swap), a BFD-capable peer gives up the session and resets BGP. The reconciler
+re-stamps on its next tick, so the worst-case recovery is one 30s tick; a peer
+that does not run BFD has no session to drop and BGP rides through the gap. BFD
+here is passive (BIRD answers a peer that initiates, it never starts one), so a
+fully passive peer-and-owner pair never establishes a session — the peer must be
+the active BFD speaker.
+
+The owner must preserve the LRP's own ``microovn-bgp-attach`` marker while attach
+is active. A controller that rewrites ``external_ids`` wholesale (as Neutron's
+OVN IDL resync does) drops that marker; MicroOVN then sees no desired target and
+tears the attachment down, but its ownership journal in the local OVS DB
+survives. Neutron/Sunbeam compatibility is not yet validated.
+
+Minimum OVN version: attach mode requires OVN 26.03 or newer on the central
+(northd) side. The chassis always runs the version shipped by the MicroOVN snap.
+The dynamic-routing primitives the attach uses (``routing-protocol-redirect``,
+``dynamic-routing-port-name``, ``-maintain-vrf``) arrived in 25.03; the gate is
+pinned at 26.03 because that is where ``options:dynamic-routing-vrf-id`` was
+introduced, which attach anchors its VRF-id discovery on.
+
+.. note::
+
+   ``microovn-bgp-asn`` is used in two distinct places: by ``microovn setup bgp``
+   as a dqlite cluster key, and by the reconciler as an ``Open_vSwitch``
+   external-id. The two stores are separate. The managed path's enable trigger is
+   the ``microovn-bgp-setup`` ``Open_vSwitch`` external-id (a ``bool``-like flag,
+   formerly ``microovn-bgp-enabled``); attach mode instead uses the
+   ``microovn-bgp`` gate plus the per-``Logical_Router_Port``
+   ``microovn-bgp-attach`` marker.
+
 Disable BGP integration
 -----------------------
 

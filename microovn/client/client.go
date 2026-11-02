@@ -322,3 +322,15 @@ func SetupBgp(ctx context.Context, c microTypes.Client, request types.SetupBgpRe
 
 	return responseData, err
 }
+
+// SetupBird sends a raw BIRD configuration to the local node (`microovn setup
+// bird`).
+func SetupBird(ctx context.Context, c microTypes.Client, request types.SetupBirdRequest) (types.SetupBirdResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, time.Second*30)
+	defer cancel()
+
+	responseData := types.SetupBirdResponse{}
+	err := c.Query(queryCtx, "POST", types.APIVersion, &url.URL{Path: "bgp/bird"}, request, &responseData)
+
+	return responseData, err
+}
