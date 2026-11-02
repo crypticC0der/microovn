@@ -27,12 +27,12 @@ const BgpConfigKeyPrefix = "microovn-bgp"
 
 const BgpConfigKeyCluster = "microovn-bgp-cluster"
 
-const BgpConfigKeyInterface = "microovn-bgp-arg-interface"
+const BgpConfigKeyInterface = "microovn-bgp-interface"
 
-const BgpConfigKeyBridge = "microovn-bgp-arg-br"
+const BgpConfigKeyBridge = "microovn-bgp-br"
 
-const BgpConfigKeyAsn = "microovn-bgp-arg-asn"
+const BgpConfigKeyAsn = "microovn-bgp-asn"
 
-const BgpConfigKeyAsnRange = "microovn-bgp-arg-asn_range"
+const BgpConfigKeyAsnRange = "microovn-bgp-asn-range"
 
-const BgpConfigKeyConnectionIP4Range = "microovn-bgp-arg-connection-ip4-range"
+const BgpConfigKeyConnectionIP4Range = "microovn-bgp-connection-ip4-range"
