@@ -140,7 +140,7 @@ func (c *Config) CleanupVRFs(ctx context.Context, delete bool) error {
 			return fmt.Errorf("failed to flush vrf '%s': %v", vrf, err)
 		}
 		if delete {
-			_, err = shared.RunCommand(ctx, "ip", "link ", "delete", "dev", vrf)
+			_, err = shared.RunCommand(ctx, "ip", "link", "delete", "dev", vrf)
 			if err != nil {
 				return fmt.Errorf("failed to delete vrf '%s': %v", vrf, err)
 			}
