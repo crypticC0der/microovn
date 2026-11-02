@@ -24,8 +24,23 @@ import (
 
 // BgpManagedTag - a key used in "external_ids" table of various OVN/OVS
 // resources to identify those that are created and managed by MicroOVN
-// for the purpose of BGP integration
+// for the purpose of BGP integration. The value is the name of the chassis
+// that created the resource, so teardown only ever removes resources owned
+// by the local chassis.
+//
+// NOTE: the value used to be the literal "true" (not the chassis name), and
+// released snaps (v26.03) ship that "true" tagging. Any resource created by an
+// older build and still tagged "true" is no longer matched by teardown and will
+// be orphaned on upgrade. This is a deliberate one-way break (not migrated, for
+// simpler code); record it against the release.
 const BgpManagedTag = "microovn-bgp-managed"
+
+// getBgpManagedTagValue returns the value MicroOVN uses to mark resources it
+// created and owns for BGP integration. It is intentionally scoped to the
+// calling chassis so that a member only tears down its own resources.
+func getBgpManagedTagValue(s microTypes.State) string {
+	return s.Name()
+}
 
 // BgpVrfTable - a key used in "external_ids" table of OVS ports used for
 // BGP redirecting. It keeps information about which VRF table should these
@@ -311,7 +326,7 @@ func createExternalBridges(ctx context.Context, s microTypes.State, bridges []ty
 			"--",
 			"add-br", bridgeName,
 			"--",
-			"set", "bridge", bridgeName, fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+			"set", "bridge", bridgeName, fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 			"--",
 			"set", "Open_vSwitch", ".", fmt.Sprintf("external-ids:ovn-bridge-mappings=\"%s\"", bridgeMap),
 			fmt.Sprintf("external-ids:%s=\"%s\"", BgpBridgeMapping, bridgeMap),
@@ -341,8 +356,6 @@ func createBridgeNetworks(ctx context.Context, s microTypes.State, bridges []typ
 
 		_, err := ovnCmd.VSCtl(ctx, s,
 			"--",
-			"set", "bridge", bridge.Bridge, fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
-			"--",
 			"set", "Open_vSwitch", ".", fmt.Sprintf("external-ids:ovn-bridge-mappings=\"%s\"", bridgeMap),
 			fmt.Sprintf("external-ids:%s=\"%s\"", BgpBridgeMapping, bridgeMap),
 		)
@@ -367,7 +380,7 @@ func createExternalNetworks(ctx context.Context, s microTypes.State, bridges []t
 		"--",
 		"set", "Logical_Router", lrName, fmt.Sprintf("options:chassis=%s", s.Name()),
 		"--",
-		"set", "Logical_Router", lrName, fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+		"set", "Logical_Router", lrName, fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 	)
 	if err != nil {
 		logger.Errorf("Failed to create OVN Logical Router for external connectivity: %v", err)
@@ -393,7 +406,7 @@ func createExternalNetworks(ctx context.Context, s microTypes.State, bridges []t
 			// Create Logical Switch and connect it to the Logical Router Port
 			"ls-add", lsName,
 			"--",
-			"set", "Logical_Switch", lsName, fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+			"set", "Logical_Switch", lsName, fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 			"--",
 			"lsp-add", lsName, lspName,
 			"--",
@@ -582,12 +595,12 @@ func redirectBgp(ctx context.Context, s microTypes.State, bridges []types.BgpBri
 		// Create OVS port and associate it with the LSP
 		_, err = ovnCmd.VSCtl(ctx, s,
 			"--",
-			"set", "Port", brgIface, fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+			"set", "Port", brgIface, fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 			fmt.Sprintf("external-ids:%s=%s", BgpVrfTable, vrfName),
 
 			"--",
 			"set", "Interface", brgIface, "type=system", fmt.Sprintf("external_ids:iface-id=%s", bgpLsp),
-			fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+			fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create port for BGP redirect '%s': %v", brgIface, err)
@@ -609,7 +622,7 @@ func teardownAll(ctx context.Context, s microTypes.State) error {
 	var allErrors error
 	// Find and remove Logical Router used for BGP redirect
 	logicalRouter := getLrName(s)
-	_, err := ovnCmd.NBCtlCluster(ctx, s, ovnCmd.DefaultDBStateWait, "lr-del", logicalRouter)
+	_, err := ovnCmd.NBCtlCluster(ctx, s, ovnCmd.DefaultDBStateWait, "--if-exists", "lr-del", logicalRouter)
 	if err != nil {
 		allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete Logical Router '%s': %v", logicalRouter, err))
 	}
@@ -621,7 +634,7 @@ func teardownAll(ctx context.Context, s microTypes.State) error {
 
 	// Find and remove Logical Switches used to connect to external networks on the local chassis
 	logicalSwitches, err := ovnCmd.NBCtlCluster(ctx, s, ovnCmd.DefaultDBStateWait, "--bare", "--columns", "name",
-		"find", "logical_switch", fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+		"find", "logical_switch", fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 	)
 	if err != nil {
 		allErrors = errors.Join(allErrors, fmt.Errorf("failed to lookup Logical Switches managed by MicroOVN: %v", err))
@@ -641,7 +654,7 @@ func teardownAll(ctx context.Context, s microTypes.State) error {
 
 	// Find and remove external OVS bridges
 	bridges, err := ovnCmd.VSCtl(ctx, s, "--bare", "--columns", "name",
-		"find", "bridge", fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+		"find", "bridge", fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 	)
 	if err != nil {
 		allErrors = errors.Join(allErrors, fmt.Errorf("failed to lookup OVS Bridges managed by MicroOVN: %v", err))
@@ -656,7 +669,7 @@ func teardownAll(ctx context.Context, s microTypes.State) error {
 
 	// Find and remove OVS ports used for BGP redirect
 	ports, err := ovnCmd.VSCtl(ctx, s, "--bare", "--columns", "name",
-		"find", "port", fmt.Sprintf("external-ids:%s=true", BgpManagedTag),
+		"find", "port", fmt.Sprintf("external-ids:%s=%s", BgpManagedTag, getBgpManagedTagValue(s)),
 	)
 	if err != nil {
 		allErrors = errors.Join(allErrors, fmt.Errorf("failed to lookup OVS Ports managed by MicroOVN: %v", err))
