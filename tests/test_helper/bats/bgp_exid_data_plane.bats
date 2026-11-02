@@ -38,8 +38,8 @@ function ping_ovn_int_network_over_bgp_router() {
     run lxc_exec "$TEST_CONTAINER" "snap start microovn.switch"
     sleep 1
     lxc_exec "$TEST_CONTAINER" "ovs-vsctl add-br br0"
-    lxc_exec "$TEST_CONTAINER" "ovs-vsctl set Bridge br0 external-ids:microovn-bgp-enabled=true"
-    lxc_exec "$TEST_CONTAINER" "ovs-vsctl --bare --columns name find bridge external-ids:microovn-bgp-enabled=true"
+    lxc_exec "$TEST_CONTAINER" "ovs-vsctl set Bridge br0 external-ids:microovn-bgp-setup=true"
+    lxc_exec "$TEST_CONTAINER" "ovs-vsctl --bare --columns name find bridge external-ids:microovn-bgp-setup=true"
     lxc_exec "$TEST_CONTAINER" "ovs-vsctl add-port br0 $OVN_CONTAINER_INT_IFACE"
     echo "# Bootstrapping cluster which should enable MicroOVN BGP in $TEST_CONTAINER and configuring BGP" >&3
     bootstrap_cluster $TEST_CONTAINER

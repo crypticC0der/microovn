@@ -237,10 +237,8 @@ func EnableBgpOnNodeFromClusterConfig(ctx context.Context, s microTypes.State) e
 	return microOvnNode.EnableService(ctx, s, types.SrvBgp, extraConfig)
 }
 
-const ovsBgpEnabledKey = "microovn-bgp-enabled"
-const ovsBgpVrfKey = "microovn-bgp-vrf"
+const ovsBgpEnabledKey = "microovn-bgp-setup"
 const ovsBgpAsnKey = "microovn-bgp-asn"
-const ovsBgpAsnRangeKey = "microovn-bgp-asn-range"
 
 func EnableBgpFromOVSExternalIDs(ctx context.Context, s microTypes.State) error {
 	switchActive, err := microOvnNode.HasServiceActive(ctx, s, types.SrvSwitch)
@@ -260,39 +258,21 @@ func EnableBgpFromOVSExternalIDs(ctx context.Context, s microTypes.State) error 
 		return nil
 	}
 
+	// The ASN knob is chassis-wide and lives on Open_vSwitch (shared with attach
+	// mode); read it once rather than per-bridge.
+	asn, err := bgp.VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", ovsBgpAsnKey)
+	if err != nil {
+		return fmt.Errorf("failed to read %s on Open_vSwitch: %w", ovsBgpAsnKey, err)
+	}
+
 	for _, bridgeName := range bridgeNames {
 		logger.Infof("Enabling BGP on bridge %s from OVS external IDs", bridgeName)
 
 		bgpConfig := &types.ExtraBgpConfig{
 			Bridge: bridgeName,
 		}
-
-		vrf, err := bgp.VsctlGetIfExists(ctx, s, "Bridge", bridgeName, "external-ids", ovsBgpVrfKey)
-		if err != nil {
-			return fmt.Errorf("failed to read %s on bridge %s: %w", ovsBgpVrfKey, bridgeName, err)
-		}
-		if vrf != "" {
-			bgpConfig.Vrf = vrf
-		}
-
-		asn, err := bgp.VsctlGetIfExists(ctx, s, "Bridge", bridgeName, "external-ids", ovsBgpAsnKey)
-		if err != nil {
-			return fmt.Errorf("failed to read %s on bridge %s: %w", ovsBgpAsnKey, bridgeName, err)
-		}
 		if asn != "" {
 			bgpConfig.Asn = asn
-		} else {
-			asnRange, err := bgp.VsctlGetIfExists(ctx, s, "Bridge", bridgeName, "external-ids", ovsBgpAsnRangeKey)
-			if err != nil {
-				return fmt.Errorf("failed to read %s on bridge %s: %w", ovsBgpAsnRangeKey, bridgeName, err)
-			}
-			if asnRange != "" {
-				parsed, err := types.ParseAsnRange(asnRange)
-				if err != nil {
-					return fmt.Errorf("invalid %s on bridge %s: %w", ovsBgpAsnRangeKey, bridgeName, err)
-				}
-				bgpConfig.AsnRange = parsed
-			}
 		}
 
 		extraConfig := &types.ExtraServiceConfig{

@@ -150,19 +150,19 @@ func TestBgpConfigKeyConstants(t *testing.T) {
 	if BgpConfigKeyCluster != "microovn-bgp-cluster" {
 		t.Errorf("expected 'microovn-bgp-cluster', got '%s'", BgpConfigKeyCluster)
 	}
-	if BgpConfigKeyInterface != "microovn-bgp-arg-interface" {
-		t.Errorf("expected 'microovn-bgp-arg-interface', got '%s'", BgpConfigKeyInterface)
+	if BgpConfigKeyInterface != "microovn-bgp-interface" {
+		t.Errorf("expected 'microovn-bgp-interface', got '%s'", BgpConfigKeyInterface)
 	}
-	if BgpConfigKeyBridge != "microovn-bgp-arg-br" {
-		t.Errorf("expected 'microovn-bgp-arg-br', got '%s'", BgpConfigKeyBridge)
+	if BgpConfigKeyBridge != "microovn-bgp-br" {
+		t.Errorf("expected 'microovn-bgp-br', got '%s'", BgpConfigKeyBridge)
 	}
-	if BgpConfigKeyAsn != "microovn-bgp-arg-asn" {
-		t.Errorf("expected 'microovn-bgp-arg-asn', got '%s'", BgpConfigKeyAsn)
+	if BgpConfigKeyAsn != "microovn-bgp-asn" {
+		t.Errorf("expected 'microovn-bgp-asn', got '%s'", BgpConfigKeyAsn)
 	}
-	if BgpConfigKeyAsnRange != "microovn-bgp-arg-asn_range" {
-		t.Errorf("expected 'microovn-bgp-arg-asn_range', got '%s'", BgpConfigKeyAsnRange)
+	if BgpConfigKeyAsnRange != "microovn-bgp-asn-range" {
+		t.Errorf("expected 'microovn-bgp-asn-range', got '%s'", BgpConfigKeyAsnRange)
 	}
-	if BgpConfigKeyConnectionIP4Range != "microovn-bgp-arg-connection-ip4-range" {
-		t.Errorf("expected 'microovn-bgp-arg-connection-ip4-range', got '%s'", BgpConfigKeyConnectionIP4Range)
+	if BgpConfigKeyConnectionIP4Range != "microovn-bgp-connection-ip4-range" {
+		t.Errorf("expected 'microovn-bgp-connection-ip4-range', got '%s'", BgpConfigKeyConnectionIP4Range)
 	}
 }
