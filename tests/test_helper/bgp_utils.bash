@@ -52,6 +52,7 @@ EOF
   neighbor $interface default-originate
   neighbor $interface soft-reconfiguration inbound
   neighbor $interface prefix-list accept-all in
+  neighbor $interface prefix-list accept-all out
 EOF
         done
 
@@ -67,6 +68,7 @@ EOF
   neighbor $interface soft-reconfiguration inbound
   neighbor $interface activate
   neighbor $interface prefix-list accept-all in
+  neighbor $interface prefix-list accept-all out
 EOF
         done
 
@@ -108,6 +110,45 @@ EOF
   neighbor $peer_ip default-originate
   neighbor $peer_ip soft-reconfiguration inbound
   neighbor $peer_ip prefix-list accept-all in
+  neighbor $peer_ip prefix-list accept-all out
+ exit-address-family
+!
+EOF
+    } | lxc_exec "$container" "vtysh"
+}
+
+# frr_advertise_network CONTAINER ASN NETWORK
+#
+# Make the FRR BGP speaker on CONTAINER originate NETWORK (CIDR) in addition to
+# whatever it already announces (e.g. its default). FRR only advertises a
+# `network` statement when a matching route exists in its RIB, so a blackhole
+# static route is installed first.
+function frr_advertise_network() {
+    local container=$1; shift
+    local asn=$1; shift
+    local network=$1; shift
+
+    # Originate NETWORK by giving the peer a dummy interface with an address in
+    # it, then a `network` statement. The dummy interface lands the connected
+    # route in the MAIN table (what FRR's `network` import-check looks at); a
+    # loopback address lands in the LOCAL table, and a blackhole route has no
+    # usable nexthop, so neither is originated. The neighbor also needs an
+    # outbound prefix-list (frr_start_bgp_* sets `prefix-list accept-all out`)
+    # or FRR discards outbound updates "due to missing policy".
+    local base="${network%/*}"
+    local len="${network#*/}"
+    local addr="${base%.*}.$(( ${base##*.} + 1 ))/${len}"
+
+    lxc_exec "$container" "ip link add frr-adv type dummy" || true
+    lxc_exec "$container" "ip addr add $addr dev frr-adv"
+    lxc_exec "$container" "ip link set frr-adv up"
+
+    {
+        cat <<EOF
+configure
+router bgp $asn
+ address-family ipv4 unicast
+  network $network
  exit-address-family
 !
 EOF

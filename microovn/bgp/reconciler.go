@@ -151,7 +151,7 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 		}
 	}
 
-	routerID, asn, advertise, err := readAttachKnobs(ctx, s)
+	routerID, asn, advertise, imp, err := readAttachKnobs(ctx, s)
 	if err != nil {
 		return err
 	}
@@ -194,6 +194,7 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 		LocalASN:       asn,
 		AdvertiseTable: advertise,
 		LearnTable:     learn,
+		ImportPolicy:   imp,
 		Targets:        targets,
 	}
 

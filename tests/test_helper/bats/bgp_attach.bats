@@ -28,7 +28,7 @@ teardown() {
 
     # Drop the attach gate and chassis knobs (idempotent; the test may already
     # have removed the gate).
-    for key in microovn-bgp microovn-bgp-asn microovn-bgp-router-id microovn-bgp-advertise-table; do
+    for key in microovn-bgp microovn-bgp-asn microovn-bgp-router-id microovn-bgp-advertise-table microovn-bgp-import-filter; do
         lxc_exec "$chassis" "microovn.ovs-vsctl remove Open_vSwitch . external-ids $key" || true
     done
 
@@ -133,6 +133,17 @@ attach_default_route_via() {
     lxc_exec "$container" "ip route show table $table | grep -q \"default via $addr\""
 }
 
+# attach_route_in_vrf CONTAINER TABLE NETWORK — NETWORK (CIDR) is present in the
+# VRF table. Used to prove a more-specific route a peer advertises within a
+# listed import-filter aggregate actually reaches the VRF (the `prefix+`
+# subnet-inclusive match).
+attach_route_in_vrf() {
+    local container=$1; shift
+    local table=$1; shift
+    local network=$1; shift
+    lxc_exec "$container" "ip route show table $table | grep -qF \"$network\""
+}
+
 # attach_veth_ipv4_count CONTAINER PORT_NAME — prints the number of IPv4 addresses
 # on the attachment veth (looked up via dynamic-routing-port-mapping).
 attach_veth_ipv4_count() {
@@ -169,6 +180,10 @@ bgp_attach_register_test_functions() {
     bats_test_function \
         --description "Attach BIRD to an externally owned router port (numbered IPv4)" \
         -- attach_external_router_numbered
+
+    bats_test_function \
+        --description "Attach import filter imports a peer-advertised subnet of a listed aggregate" \
+        -- attach_external_router_import_filter
 }
 
 # attach_external_router
@@ -433,6 +448,110 @@ attach_external_router_numbered() {
     run lxc_exec "$chassis" "microovn.ovn-nbctl get Logical_Router_Port $lrp networks"
     assert_success
     assert_output --partial "$transit_host/30"
+
+    # Remove the enable gate for a clean teardown.
+    lxc_exec "$chassis" "microovn.ovs-vsctl remove Open_vSwitch . external-ids microovn-bgp"
+}
+
+# attach_external_router_import_filter
+#
+# Same numbered shape as attach_external_router_numbered, but sets
+# microovn-bgp-import-filter to an aggregate (172.0.0.0/8) and has the FRR peer
+# advertise a more-specific /24 within it (172.16.0.0/24). Verifies the
+# subnet-inclusive import: the /24 must reach the OVN VRF, which only happens if
+# the listed aggregate is rendered with BIRD's `prefix+` form (an exact-match
+# render would drop the /24).
+attach_external_router_import_filter() {
+    local chassis="$TEST_CONTAINER"
+    local tor_asn=4200000100
+    local host_asn=4210000001
+    local router_id=192.0.2.1
+    local learn_table=10
+    local advert_table=100
+    local physnet=extnet
+    local bridge=br-bgp
+    local lr=lr-ext
+    local ls=ls-ext
+    local lrp=lrp-ext
+    local port_name=att-ext
+    local transit_host=10.0.0.1
+    local transit_peer=10.0.0.2
+    local import_filter=172.0.0.0/8
+    local import_network=172.16.0.0/24
+
+    # Start the FRR peer on the ToR interface with a numbered IPv4 address, and
+    # make it originate the default route plus a /24 within the import-filter
+    # aggregate.
+    echo "# Starting numbered BGP on $BGP_PEER" >&3
+    lxc_exec "$BGP_PEER" "ip link set $BGP_CONTAINER_INT_IFACE up"
+    frr_start_bgp_numbered "$BGP_PEER" "$tor_asn" "$BGP_CONTAINER_INT_IFACE" "$transit_peer/30" "$transit_host"
+    frr_advertise_network "$BGP_PEER" "$tor_asn" "$import_network"
+
+    echo "# ($chassis) Creating externally owned provider bridge and OVN topology" >&3
+    lxc_exec "$chassis" "microovn.ovs-vsctl add-br $bridge"
+    lxc_exec "$chassis" "microovn.ovs-vsctl add-port $bridge $OVN_CONTAINER_INT_IFACE"
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=$physnet:$bridge"
+
+    lxc_exec "$chassis" \
+        "microovn.ovn-nbctl \
+            lr-add $lr \
+            -- set Logical_Router $lr options:chassis=$chassis \
+            -- set Logical_Router $lr options:dynamic-routing=true \
+            -- set Logical_Router $lr options:dynamic-routing-vrf-id=$learn_table \
+            -- lrp-add $lr $lrp 02:00:00:00:00:02 $transit_host/30 \
+            -- set Logical_Router_Port $lrp options:dynamic-routing-maintain-vrf=true \
+            -- set Logical_Router_Port $lrp options:dynamic-routing-port-name=$port_name \
+            -- ls-add $ls \
+            -- lsp-add $ls lsp-$lr \
+            -- lsp-set-type lsp-$lr router \
+            -- lsp-set-options lsp-$lr router-port=$lrp \
+            -- lsp-set-addresses lsp-$lr router \
+            -- lsp-add $ls lsp-$ls-localnet \
+            -- lsp-set-type lsp-$ls-localnet localnet \
+            -- lsp-set-options lsp-$ls-localnet network_name=$physnet \
+            -- lsp-set-addresses lsp-$ls-localnet unknown"
+
+    echo "# ($chassis) Waiting for OVN to create the VRF ovnvrf$learn_table" >&3
+    wait_until "attach_vrf_ready $chassis $learn_table" false 30
+
+    echo "# ($chassis) Stamping attach markers and knobs (incl. import filter)" >&3
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:microovn-bgp=enabled"
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:microovn-bgp-asn=$host_asn"
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:microovn-bgp-router-id=$router_id"
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:microovn-bgp-advertise-table=$advert_table"
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:microovn-bgp-import-filter=$import_filter"
+    lxc_exec "$chassis" "microovn.ovn-nbctl set Logical_Router_Port $lrp external_ids:microovn-bgp-attach=true"
+    lxc_exec "$chassis" "microovn.ovn-nbctl set Logical_Router_Port $lrp external_ids:microovn-bgp-peers=$tor_asn@$transit_peer"
+
+    echo "# ($chassis) Waiting for the reconciler to attach (next 30s tick)" >&3
+    wait_until "attach_redirect_set $chassis $lrp" false 60
+
+    # The rendered attach BIRD config must carry the subnet-inclusive (`+=`)
+    # import filter for the listed aggregate.
+    run lxc_exec "$chassis" \
+        "grep -q 'net ~ \\[ 172.0.0.0/8+ \\]' /var/snap/microovn/common/data/bird/bird.conf"
+    assert_success
+
+    echo "# ($chassis) Waiting on established BGP with $BGP_PEER" >&3
+    wait_until "attach_bgp_established $chassis" false 60
+
+    echo "# ($chassis) Waiting on default route learned via $transit_peer in the OVN VRF" >&3
+    wait_until "attach_default_route_via $chassis $learn_table $transit_peer" false 60
+
+    # The import filter must import the peer-advertised /24 within the listed /8
+    # into the VRF (proves the `prefix+` subnet-inclusive match end-to-end).
+    echo "# ($chassis) Waiting on $import_network learned into the OVN VRF" >&3
+    wait_until "attach_route_in_vrf $chassis $learn_table $import_network" false 60
+
+    echo "# ($chassis) Removing the attach marker (gate stays enabled) to detach" >&3
+    lxc_exec "$chassis" "microovn.ovn-nbctl remove Logical_Router_Port $lrp external_ids microovn-bgp-attach"
+
+    echo "# ($chassis) Waiting for the reconciler to detach (next 30s tick)" >&3
+    wait_until "attach_redirect_gone $chassis $lrp" false 60
+    wait_until "attach_bird_config_gone $chassis" false 30
+
+    run lxc_exec "$chassis" "microovn.ovn-nbctl get Logical_Router_Port $lrp options:routing-protocols"
+    assert_failure
 
     # Remove the enable gate for a clean teardown.
     lxc_exec "$chassis" "microovn.ovs-vsctl remove Open_vSwitch . external-ids microovn-bgp"

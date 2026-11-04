@@ -239,6 +239,23 @@ The chassis-wide knobs live on ``Open_vSwitch`` ``external_ids``:
   metric) that BIRD advertises out. **Required** in attach mode; it is never
   auto-generated because a table nobody writes to would silently advertise
   nothing.
+- ``microovn-bgp-import-filter`` — which routes BIRD accepts *from* attach
+  peers (optional). One of:
+
+  - ``default`` (or unset) — import only the default route ``0.0.0.0/0``. This
+    is the classic spine-leaf contract: a leaf compute only needs a default
+    from its ToR.
+  - ``all`` — import every route the peer sends.
+  - a comma-separated list of IPv4 prefixes — import the default route plus
+    those prefixes (e.g. ``172.0.0.0/8,10.149.0.0/16``), for fabrics that
+    advertise specific segments rather than just a default. Each prefix is
+    matched inclusively (the prefix and all of its subnets), so ``172.0.0.0/8``
+    imports ``172.20.0.0/24`` and every other more-specific route within it.
+    The default route is always imported, so listing ``0.0.0.0/0`` is rejected.
+    Up to 32 prefixes may be listed.
+
+  The imported routes are installed into the OVN VRF (``learn-table``) the same
+  way the default route is.
 
 Per-port configuration lives on the tagged ``Logical_Router_Port``
 ``external_ids``:

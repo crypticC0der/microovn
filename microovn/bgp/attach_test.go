@@ -1,6 +1,7 @@
 package bgp
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -156,6 +157,103 @@ func TestAttachBirdConfigNumbered(t *testing.T) {
 	}
 	if strings.Contains(bird, "extended next hop") {
 		t.Errorf("numbered uplink must not render extended-next-hop:\n%s", bird)
+	}
+}
+
+func TestParseImportPolicy(t *testing.T) {
+	cases := []struct {
+		in         string
+		wantAll    bool
+		wantPrefix []netip.Prefix
+		wantErr    bool
+	}{
+		{"", false, nil, false},
+		{"default", false, nil, false},
+		{"all", true, nil, false},
+		{"172.0.0.0/8,10.149.0.0/16", false, []netip.Prefix{netip.MustParsePrefix("172.0.0.0/8"), netip.MustParsePrefix("10.149.0.0/16")}, false},
+		{" 172.0.0.0/8 , 10.149.0.0/16 ", false, []netip.Prefix{netip.MustParsePrefix("172.0.0.0/8"), netip.MustParsePrefix("10.149.0.0/16")}, false},
+		{"fe80::/10", false, nil, true},
+		{"0.0.0.0/0", false, nil, true},
+		{"10.0.0.0/0", false, nil, true},
+		{"not-a-prefix", false, nil, true},
+		{"172.0.0.0/8,bogus", false, nil, true},
+		{",", false, nil, true},
+		{",,", false, nil, true},
+		{"ALL", false, nil, true},
+	}
+	for _, c := range cases {
+		got, err := parseImportPolicy(c.in)
+		if (err != nil) != c.wantErr {
+			t.Fatalf("parseImportPolicy(%q) err = %v, wantErr %v", c.in, err, c.wantErr)
+		}
+		if err != nil {
+			continue
+		}
+		if got.All != c.wantAll {
+			t.Errorf("parseImportPolicy(%q).All = %v, want %v", c.in, got.All, c.wantAll)
+		}
+		if len(got.Prefixes) != len(c.wantPrefix) {
+			t.Fatalf("parseImportPolicy(%q) prefixes = %v, want %v", c.in, got.Prefixes, c.wantPrefix)
+		}
+		for i := range got.Prefixes {
+			if got.Prefixes[i] != c.wantPrefix[i] {
+				t.Errorf("parseImportPolicy(%q).Prefixes[%d] = %s, want %s", c.in, i, got.Prefixes[i], c.wantPrefix[i])
+			}
+		}
+	}
+
+	// A list of more than maxImportPrefixes prefixes is rejected.
+	var many []string
+	for i := 0; i <= maxImportPrefixes; i++ {
+		many = append(many, fmt.Sprintf("10.%d.0.0/16", i))
+	}
+	if _, err := parseImportPolicy(strings.Join(many, ",")); err == nil {
+		t.Errorf("parseImportPolicy with %d prefixes must error", len(many))
+	}
+}
+
+func TestAttachBirdConfigImportPolicy(t *testing.T) {
+	base := attachConfig{
+		RouterID:       "192.0.2.1",
+		LocalASN:       65101,
+		AdvertiseTable: 42,
+		LearnTable:     10,
+		Targets:        []attachTarget{{RouterPort: "external-port", Peers: []types.Peer{{Address: "fe80::1", ASN: 65002}}}},
+	}
+
+	// Zero value = default: import only the default route, forward only the
+	// default into the VRF.
+	if bird := attachBirdConfig(base); !strings.Contains(bird, "import filter { if net = 0.0.0.0/0 then accept; reject; };") ||
+		!strings.Contains(bird, "if source = RTS_BGP && (net = 0.0.0.0/0) then accept; reject;") {
+		t.Errorf("default policy rendered unexpectedly:\n%s", bird)
+	}
+
+	allCfg := base
+	allCfg.ImportPolicy = importPolicy{All: true}
+	bird := attachBirdConfig(allCfg)
+	if !strings.Contains(bird, "import all;") {
+		t.Errorf("all policy missing import all:\n%s", bird)
+	}
+	if !strings.Contains(bird, "if source = RTS_BGP then accept; reject;") {
+		t.Errorf("all policy pipe missing unrestricted forward:\n%s", bird)
+	}
+	if strings.Contains(bird, "import filter { if net = 0.0.0.0/0") {
+		t.Errorf("all policy must not render the default-only import filter:\n%s", bird)
+	}
+
+	prefixCfg := base
+	prefixCfg.ImportPolicy = importPolicy{Prefixes: []netip.Prefix{
+		netip.MustParsePrefix("172.0.0.0/8"),
+		netip.MustParsePrefix("10.0.0.0/16"),
+	}}
+	bird = attachBirdConfig(prefixCfg)
+	for _, want := range []string{
+		"import filter { if net = 0.0.0.0/0 || net ~ [ 172.0.0.0/8+, 10.0.0.0/16+ ] then accept; reject; };",
+		"if source = RTS_BGP && (net = 0.0.0.0/0 || net ~ [ 172.0.0.0/8+, 10.0.0.0/16+ ]) then accept; reject;",
+	} {
+		if !strings.Contains(bird, want) {
+			t.Errorf("prefix policy missing %q:\n%s", want, bird)
+		}
 	}
 }
 

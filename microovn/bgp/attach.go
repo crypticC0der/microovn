@@ -54,6 +54,7 @@ const (
 	attachAsnKey       = "microovn-bgp-asn"
 	attachRouterIDKey  = "microovn-bgp-router-id"
 	attachAdvertiseKey = "microovn-bgp-advertise-table"
+	attachImportKey    = "microovn-bgp-import-filter"
 )
 
 // Open_vSwitch external-id key prefixes used to remember the owner's pre-attach
@@ -103,7 +104,113 @@ type attachConfig struct {
 	LocalASN       uint32
 	AdvertiseTable uint32
 	LearnTable     uint32
+	ImportPolicy   importPolicy
 	Targets        []attachTarget
+}
+
+// importPolicy describes which routes BIRD accepts from attach peers. The zero
+// value is the default: import only the default route (0.0.0.0/0), matching the
+// classic spine-leaf contract where a leaf compute needs nothing but a default
+// from its ToR.
+type importPolicy struct {
+	// All imports every route the peer sends (overrides Prefixes).
+	All bool
+	// Prefixes are additional prefixes accepted in addition to the always
+	// imported default route. Set only when the external-id is a comma-separated
+	// prefix list.
+	Prefixes []netip.Prefix
+}
+
+// maxImportPrefixes caps the number of explicit prefixes an operator may list,
+// keeping the rendered BIRD filter sane and the failure mode obvious.
+const maxImportPrefixes = 32
+
+// parseImportPolicy parses the microovn-bgp-import-filter external-id. The
+// accepted forms are "default" (or unset) for the default-only import, "all"
+// for an unrestricted import, or a comma-separated list of IPv4 prefixes that
+// are accepted in addition to the default route. Each listed prefix is matched
+// inclusively (the prefix and all its subnets, rendered as BIRD `prefix+`), so
+// an aggregate like 172.0.0.0/8 imports every more-specific route within it.
+// The default route itself is always imported, so listing it is rejected.
+func parseImportPolicy(raw string) (importPolicy, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "default" {
+		return importPolicy{}, nil
+	}
+	if raw == "all" {
+		return importPolicy{All: true}, nil
+	}
+
+	var p importPolicy
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return importPolicy{}, fmt.Errorf("invalid %s prefix %q: %w", attachImportKey, entry, err)
+		}
+		if !prefix.Addr().Is4() {
+			return importPolicy{}, fmt.Errorf("%s prefix %q is not IPv4", attachImportKey, prefix)
+		}
+		if prefix.Bits() == 0 {
+			return importPolicy{}, fmt.Errorf("%s prefix %q is the whole IPv4 space, which is always imported", attachImportKey, prefix)
+		}
+		p.Prefixes = append(p.Prefixes, prefix)
+	}
+	if len(p.Prefixes) == 0 {
+		return importPolicy{}, fmt.Errorf("%s lists no prefixes", attachImportKey)
+	}
+	if len(p.Prefixes) > maxImportPrefixes {
+		return importPolicy{}, fmt.Errorf("%s lists %d prefixes (max %d)", attachImportKey, len(p.Prefixes), maxImportPrefixes)
+	}
+	return p, nil
+}
+
+// importCond returns the BIRD filter condition for the routes accepted from a
+// peer (the default route plus any configured prefixes). The empty string means
+// "import all" (no filter).
+func (p importPolicy) importCond() string {
+	switch {
+	case p.All:
+		return ""
+	case len(p.Prefixes) > 0:
+		return "net = 0.0.0.0/0 || net ~ [ " + joinImportPrefixes(p.Prefixes) + " ]"
+	default:
+		return "net = 0.0.0.0/0"
+	}
+}
+
+// importLine renders the `import` line for a BGP protocol.
+func (p importPolicy) importLine() string {
+	if cond := p.importCond(); cond == "" {
+		return "import all;"
+	}
+	return "import filter { if " + p.importCond() + " then accept; reject; };"
+}
+
+// pipeExportFilter renders the pipe's export filter body (without the braces)
+// that forwards the imported routes into the VRF's learned table. It must match
+// the BGP import policy, otherwise imported non-default routes would never
+// reach the VRF.
+func (p importPolicy) pipeExportFilter() string {
+	if p.All {
+		return "if source = RTS_BGP then accept; reject;"
+	}
+	return "if source = RTS_BGP && (" + p.importCond() + ") then accept; reject;"
+}
+
+// joinImportPrefixes renders prefixes as the body of a BIRD prefix set. Each
+// prefix is rendered with BIRD's `+` shorthand (=prefix and all its subnets=),
+// so a listed aggregate (e.g. 172.0.0.0/8) imports every more-specific route a
+// fabric advertises within it, not just the exact aggregate itself.
+func joinImportPrefixes(prefixes []netip.Prefix) string {
+	parts := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		parts[i] = p.String() + "+"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // attachInterfaces returns deterministic Linux veth names keyed off the LRP
@@ -650,38 +757,47 @@ func classifyNumbered(networks []netip.Prefix, peers []types.Peer) (netip.Prefix
 }
 
 // readAttachKnobs reads the chassis-wide knobs from Open_vSwitch external_ids.
-func readAttachKnobs(ctx context.Context, s microTypes.State) (routerID string, asn uint32, advertise uint32, err error) {
+func readAttachKnobs(ctx context.Context, s microTypes.State) (routerID string, asn uint32, advertise uint32, imp importPolicy, err error) {
 	idStr, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", attachRouterIDKey)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, importPolicy{}, err
 	}
 	routerID = idStr
 
 	asnStr, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", attachAsnKey)
 	if err != nil {
-		return routerID, 0, 0, err
+		return routerID, 0, 0, importPolicy{}, err
 	}
 	if asnStr != "" {
 		n, err := strconv.ParseUint(asnStr, 10, 32)
 		if err != nil {
-			return routerID, 0, 0, fmt.Errorf("invalid %s: %s", attachAsnKey, asnStr)
+			return routerID, 0, 0, importPolicy{}, fmt.Errorf("invalid %s: %s", attachAsnKey, asnStr)
 		}
 		asn = uint32(n)
 	}
 
 	advStr, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", attachAdvertiseKey)
 	if err != nil {
-		return routerID, asn, 0, err
+		return routerID, asn, 0, importPolicy{}, err
 	}
 	if advStr != "" {
 		n, err := strconv.ParseUint(advStr, 10, 32)
 		if err != nil {
-			return routerID, asn, 0, fmt.Errorf("invalid %s: %s", attachAdvertiseKey, advStr)
+			return routerID, asn, 0, importPolicy{}, fmt.Errorf("invalid %s: %s", attachAdvertiseKey, advStr)
 		}
 		advertise = uint32(n)
 	}
 
-	return routerID, asn, advertise, nil
+	impStr, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", attachImportKey)
+	if err != nil {
+		return routerID, asn, advertise, importPolicy{}, err
+	}
+	imp, err = parseImportPolicy(impStr)
+	if err != nil {
+		return routerID, asn, advertise, importPolicy{}, err
+	}
+
+	return routerID, asn, advertise, imp, nil
 }
 
 // resolveLearnTable derives the VRF table id for a router. The id is normally
@@ -1306,6 +1422,8 @@ func updatePortMapping(ctx context.Context, s microTypes.State, key, value strin
 func attachBirdConfig(cfg attachConfig) string {
 	var b strings.Builder
 	vrfName := getVrfName(strconv.FormatUint(uint64(cfg.LearnTable), 10))
+	importLine := cfg.ImportPolicy.importLine()
+	pipeFilter := cfg.ImportPolicy.pipeExportFilter()
 	fmt.Fprintf(&b, "# Generated by microovn attach mode.\nlog syslog all;\nrouter id %s;\nprotocol device {}\n", cfg.RouterID)
 	fmt.Fprintf(&b, `protocol bfd {
  strict bind yes;
@@ -1320,13 +1438,13 @@ protocol pipe to_ovn {
  table master4;
  peer table learned;
  import none;
- export filter { if source = RTS_BGP && net = 0.0.0.0/0 then accept; reject; };
+ export filter { %s };
 }
 protocol kernel egress {
  kernel table %d;
  ipv4 { table learned; import none; export all; };
 }
-`, cfg.AdvertiseTable, cfg.LearnTable)
+`, cfg.AdvertiseTable, pipeFilter, cfg.LearnTable)
 	for i, target := range cfg.Targets {
 		host, _ := attachInterfaces(target.RouterPort)
 		for j, p := range target.Peers {
@@ -1342,7 +1460,7 @@ protocol kernel egress {
  neighbor %s as %d;
  ipv4 {
   next hop self;
-  import filter { if net = 0.0.0.0/0 then accept; reject; };
+  %s
   export filter {
    if proto = "advertisements" && net.len = 32 && defined(krt_metric) then {
     bgp_med = krt_metric;
@@ -1353,7 +1471,7 @@ protocol kernel egress {
  };
  bfd { passive yes; };
 }
-`, i, j, vrfName, cfg.LocalASN, target.LocalIP.Addr(), p.Address, p.ASN)
+`, i, j, vrfName, cfg.LocalASN, target.LocalIP.Addr(), p.Address, p.ASN, importLine)
 				continue
 			}
 			// Unnumbered (unchanged from the pre-numbered render): pin the
@@ -1368,7 +1486,7 @@ protocol kernel egress {
   extended next hop on;
   require extended next hop on;
   next hop self;
-  import filter { if net = 0.0.0.0/0 then accept; reject; };
+  %s
   export filter {
    if proto = "advertisements" && net.len = 32 && defined(krt_metric) then {
     bgp_med = krt_metric;
@@ -1379,7 +1497,7 @@ protocol kernel egress {
  };
  bfd { passive yes; };
 }
-`, i, j, vrfName, host, cfg.LocalASN, p.Address, p.ASN)
+`, i, j, vrfName, host, cfg.LocalASN, p.Address, p.ASN, importLine)
 		}
 	}
 	return b.String()
