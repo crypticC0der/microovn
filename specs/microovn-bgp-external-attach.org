@@ -1,0 +1,448 @@
+#+TITLE: MicroOVN BGP — Unified managed + attach (external-ids)
+#+STATUS: Implemented
+#+DATE: 2026-11-04
+
+* Problem
+
+MicroOVN's managed BGP (=microovn setup bgp=) owns the entire BGP topology: it
+creates the external bridge, logical router (=lr-<node>-microovn=), logical
+switches, localnet patches, VRF, veth pair and BIRD config, then tears them all
+down on disable (=microovn/bgp/service.go= =EnableService=, =redirect.go=
+=createExternalNetworks=/=createVrf=/=redirectBgp=).
+
+When the deployment also has a component that owns the OVN topology — OpenStack
+Neutron, Sunbeam, MicroCloud — MicroOVN's self-owned router/switches/patches
+collide with it.
+
+Attach mode fixes this by attaching BIRD to an externally owned logical router
+port via native =options:routing-protocol-redirect=, so MicroOVN owns only the
+BGP control-plane slice (redirect, veth, BIRD config) and none of the L2/L3
+topology. This spec keeps *both*: the managed (own-topology) path for
+interfaces/bridges, and an attach path for externally owned routers — unified
+under one =bgp= service, driven by two external-id markers.
+
+Note: v1 attach targets the *chassis* router (pinned via =options:chassis=) and
+**retains** br-interconnect; removing the interconnect hop is a future end-state,
+not v1.
+
+* Goals / non-goals
+
+** Goals
+- One =bgp= service, two modes:
+  - *managed* (own topology): create everything behind a bridge/interface.
+  - *attach* (external topology): attach BIRD to an existing LRP only.
+- In attach mode MicroOVN owns only the BGP control-plane slice (BIRD config,
+  ASN, VRF table, redirect LSP + veth + =dynamic-routing-port-mapping= entry),
+  never the L2/L3 topology.
+- Declarative =external_ids= markers *and* the =setup bgp= CLI (managed); attach
+  is marker-only.
+- Attachment points discovered from tagged objects; identity/tables resolve from
+  =Open_vSwitch= (+ learn-table from the router VRF) then MicroOVN defaults.
+- Config changes and drift reconciled continuously (declarative, convergent).
+
+** Non-goals (v1)
+- Routing scope: IPv4 host routes (/32) advertise + defaults import; eBGP peers
+  are either *unnumbered* (IPv6 link-local) or *numbered* (IPv4 transit). ECMP,
+  full NAT/LB redistribution out of scope. BFD is in scope — passive, used only
+  when the peer has it.
+- Multi-VRF per chassis (one BIRD instance per VRF is a later extension).
+- HA / chassis-redirect-port (CRP): attach targets a pinned provider-router port
+  on the local chassis; HA routers with CRP fail preflight until v2.
+- No remove-br-interconnect in v1; the optional =microovn-bgp-neutron= block keeps
+  Neutron interop by *retaining* the interconnect and its MAC-rewrite flows.
+- Managed path is kept, not deprecated.
+
+* Design overview (unified model)
+
+Two entry modes, selected by the marker the owner stamps:
+
+| mode      | marker                                          | MicroOVN does                     | CLI                  |
+|-----------+-------------------------------------------------+-----------------------------------+----------------------|
+| managed   | =microovn-bgp-setup=true= on a *bridge*          | create everything (LR/LS/veth/VRF) | =microovn setup bgp= |
+| attach    | =microovn-bgp-attach=true= on a *Logical_Router_Port* | attach BIRD only              | — (marker only)     |
+
+Both modes share the BIRD service, reconciler, validation and key family.
+
+* Entry-point semantics
+
+** =microovn setup bgp= (managed only)
+Keeps every current argument (=--interface=, =--br=, =--asn=, =--asn_range=,
+=--connection-ip4-range=) but is restricted to =--interface= or =--br=. Stays
+*cluster-wide*: writes dqlite cluster config, fans out, joins read it back. Tags
+the target bridge =microovn-bgp-setup=true= and runs the existing own-topology path.
+
+dqlite cluster-config keys are renamed to match the external-id knob names
+(drop the =microovn-bgp-arg-= prefix): =microovn-bgp-asn=, =microovn-bgp-br=,
+=microovn-bgp-interface=, =microovn-bgp-asn-range=, =microovn-bgp-connection-ip4-range=.
+The cluster flag stays =microovn-bgp-cluster= (NOT renamed to =microovn-bgp-setup=,
+which is already the Bridge external-id marker — keep the two stores distinct).
+
+** =microovn enable bgp=
+Unchanged (enable the =bgp= service). No per-port argument; attach is entered by
+stamping =microovn-bgp-attach=true= on a port, reconciled as a list of attachments.
+
+** =microovn setup bird= (raw passthrough)
+Reads BIRD config on stdin, validates (=bird -p -c= via =$SNAP/usr/sbin/bird=),
+writes it, =birdc configure= (retry the socket ~10s), =start= BIRD. Node-local
+(not a cluster op). *Refused* (error) while attach is active, and serialised with
+the reconciler via =birdConfigMu= — it does not "win over" or disable auto-BIRD.
+
+* Config schema (=external_ids=)
+
+All keys are plain =key=value= parsed+validated server-side into typed structs.
+
+** Markers (select mode)
+
+| key                   | on                    | value     | meaning                          |
+|-----------------------+-----------------------+-----------+----------------------------------|
+| =microovn-bgp-setup=  | =Bridge=              | =true=    | set up BGP on this bridge (create all) |
+| =microovn-bgp-attach= | =Logical_Router_Port= | =true=    | attach BGP to this port (attach only) |
+| =microovn-bgp=        | =Open_vSwitch=        | =enabled= | chassis-wide enable gate         |
+
+=microovn-bgp-setup= replaces the current bridge trigger =microovn-bgp-enabled=
+(=endpoints.go:240=) outright (no alias; the old key is dropped).
+
+** Per-uplink peers — =Logical_Router_Port= =external_ids=
+
+| key                  | meaning    | example                       |
+|----------------------+------------+-------------------------------|
+| =microovn-bgp-peers= | eBGP peers | =64513@fe80::1,64514@10.0.0.2= |
+
+Comma-separated =<asn>@<address>=. The address family (and, for IPv4, the peer's
+subnet) decides the peering mode; a single uplink is either numbered or
+unnumbered, never a mix:
+
+- *unnumbered* — the address is an IPv6 link-local unicast (e.g. =64513@fe80::1=).
+- *numbered* — the address is an IPv4 unicast that falls inside one of the LRP's
+  =networks= (e.g. =64514@10.0.0.2= for an LRP carrying =10.0.0.1/30=). That
+  network is the transit prefix, and the LRP's own address in it is the local BGP
+  source. There is no dedicated local-IP key: OVN's =routing-protocol-redirect=
+  shares IP and MAC between the LRP and its redirect port, so the LRP's own
+  address *is* the source.
+
+In both modes =asn= is non-zero and ≠ local, and duplicate peer addresses are
+rejected. Parsed into =[]Peer{ASN uint32; Address string}= (mode is derived at
+attach resolution, not stored in the =Peer= struct).
+
+** Config knobs — =Open_vSwitch= =external_ids= only
+
+| key                           | meaning                              | required? | example    |
+|-------------------------------+--------------------------------------+-----------+------------|
+| =microovn-bgp-asn=            | local ASN                            | no        | =64512=    |
+| =microovn-bgp-router-id=      | BIRD =router id= (IPv4)              | no        | =192.0.2.1= |
+| =microovn-bgp-advertise-table= | kernel table for host routes /32 out | attach-only (required) | =100= |
+
+=advertise-table= is *required in attach mode* and not autogenerated: it is the
+table the topology owner + BGP producer populates with chassis-local /32s (with a
+kernel metric), and it must be supplied (an auto-picked table nobody writes to
+would silently advertise nothing). In managed mode there is no separate
+=advertise-table= (the managed template reads the VRF directly).
+
+** Variable detection order
+
+1. =learn-table= ← =Logical_Router options:dynamic-routing-vrf-id= (the VRF id).
+2. =asn= / =router-id= / =advertise-table= ← =Open_vSwitch= =external_ids=.
+3. anything still unset ← MicroOVN picks a default (asn/router-id/learn-table only).
+4. =transit prefix= (numbered only) ← the LRP =networks= entry containing the IPv4
+   peers; read only when at least one peer is IPv4.
+
+** Autogenerated defaults
+
+- =asn= → cluster-member-ID hash within RFC 6996 =4210000000-4294967294=
+  (=generateAsnFromClusterMemberID=), re-checked ≠ every peer ASN.
+- =router-id= → deterministic hash of chassis name (=generateBGPRouterID=).
+- =learn-table= (=dynamic-routing-vrf-id=) → one id per *chassis*, =findAvailableVrfTableID=,
+  written to =options:dynamic-routing-vrf-id= on routers lacking one.
+- (no =advertise-table= autogen — see above)
+
+** Router options — owner-set (no auto-pick)
+
+Dynamic-routing plumbing is *owner-owned and required*; MicroOVN does not auto-pick
+it — it preflights and reports precisely what is missing. This avoids a partial-set
+divergence (owner sets one, MicroOVN fills the rest) and leaves VRF-id coordination
+to the topology owner (it is deployment-wide, not chassis-local).
+
+| option                                              | value    | who sets                          |
+|-----------------------------------------------------+----------+-----------------------------------|
+| =Logical_Router options:dynamic-routing=             | =true=   | owner (required)                  |
+| =Logical_Router options:dynamic-routing-vrf-id=      | =<id>=   | owner (required)                  |
+| =Logical_Router_Port options:dynamic-routing-maintain-vrf= | =true= | owner (required — creates =ovnvrf<N>=) |
+| =Logical_Router options:dynamic-routing-vrf-name=    | =<name>= | owner (optional; ignored if ≥ IFNAMSIZ, as OVN does) |
+
+- If =-vrf-id= is *absent* but =dynamic-routing=true= is set, MicroOVN reads the
+  effective id from =Datapath_Binding.tunnel_key= (read-only; that is what OVN is
+  already using) — never assigns, never churns the VRF.
+- If =dynamic-routing= is absent or =maintain-vrf= is absent → preflight error
+  telling the owner which option to set.
+- =dynamic-routing-redistribute= stays owner-owned (datapath *what-to-leak*).
+
+=advertise-table= producer (required in attach): the topology owner / BGP producer
+(e.g. Neutron's ovn-agent BGP extension) writes /32s with a kernel metric into the
+=advertise-table= specified on =Open_vSwitch=. MicroOVN documents this contract and
+records the chosen id.
+
+Per-port prerequisites the owner must set (identity, not plumbing):
+
+| option                                              | value                 |
+|-----------------------------------------------------+-----------------------|
+| =Logical_Router_Port options:dynamic-routing-port-name= | =<unique name>=    |
+| =Logical_Router_Port mac=                           | explicit (not =auto=) |
+| =Logical_Router_Port networks=                      | transit IPv4 (numbered only) |
+
+IPv6 unnumbered BGP requires the LRP to send periodic RAs — MicroOVN sets
+=ipv6_ra_configs:send_periodic=true=, =address_mode=slaac=, =min_interval=3=,
+=max_interval=4= on the port (matching the managed path, =redirect.go:570-576=).
+RA stamping is *mode-aware*: a numbered uplink stamps no RA options (the veth
+carries a static IPv4 instead); RA options left by a prior unnumbered attach are
+left in place until detach rather than forcibly removed, so an owner's own RA
+configuration is never disturbed.
+
+** Ownership journal
+
+| category | meaning                   | tag / record                                   | teardown          |
+|----------+---------------------------+------------------------------------------------+-------------------|
+| created  | MicroOVN made it (managed)| =microovn-bgp-managed=<chassis>= (NB)           | delete            |
+| attach   | MicroOVN attached it      | =microovn-bgp-attached= comma-list (local =Open_vSwitch=) | detach |
+| external | owner/user supplied       | no =managed= tag                               | never delete      |
+
+- The user's =--br= bridge is =external=: MicroOVN configures it but neither
+  creates nor deletes it; teardown cleans its mapping changes via the
+  =microovn-bgp-bridge-mapping= external-id on =Open_vSwitch=.
+- Attach ownership is journaled *locally* on =Open_vSwitch= as
+  =microovn-bgp-attached=<lrp-a>,<lrp-b>,...= (an =ownedAttachPorts= list), updated
+  by =addOwnedPort= / =removeOwnedPort=. MicroOVN writes no ownership tag on the
+  owner's LRP/LSP/Interface: detach is by deterministic name + this journal. This
+  survives an owner rewriting NB =external_ids= and keeps the idle path NB-free.
+- =microovn-bgp-managed=<chassis>= replaces the released v26.03 =true= value — a
+  deliberate one-way break. =HasManagedBgp= and teardown match only =<chassis>=.
+
+** Neutron compatibility — not in v1
+
+| key                   | meaning                                                      |
+|-----------------------+--------------------------------------------------------------|
+| =microovn-bgp-neutron= | (not implemented) =<bridge>,<provider-network>,<provider-switch>,<interconnect-switch>,<router-port>= |
+
+The optional Neutron interop block (publish =ovn-bridge-mappings= + =neutron-bgp-bridges=,
+install the two interconnect MAC-rewrite flows, 2s reconcile) was not ported: there
+is no =NeutronConfig= type or =neutron.go=. Revisit only if Neutron interop is
+required. Remaining risk (Neutron maintenance rewriting =options= or deleting the
+attachment's =unknown= LSP) is carried as a documented limitation.
+
+* Discovery (derived vs required)
+
+For the attach marker on a port, MicroOVN derives the rest (mirroring the attach
+preflight):
+
+- =router= — the =Logical_Router= pinning the port to =options:chassis=<local>=.
+  Only ports whose router is pinned here are eligible.
+- =switch= — 2 hops: (1) =find Logical_Switch_Port type=router options:router-port=<port>=
+  → the linking LSP (1:1; 0 = unconnected → error; n>1 = invalid); (2) parent
+  switch =find Logical_Switch 'ports{>=}<lsp-uuid>'= (unquoted; a superset match,
+  unlike ={<=}= which fails once the switch has >1 port).
+- =mac= — =Logical_Router_Port mac= (explicit).
+- =dynamic-routing-port-name= — read from the port (owner-set).
+- =peers= — =microovn-bgp-peers= =external_ids= (parsed by =types.ParsePeers=).
+- =transit prefix= — numbered only: the LRP =networks= entry containing every IPv4
+  peer (=classifyNumbered=); an IPv6-only peers list does not read =networks= at
+  all, so a malformed =networks= can't block an unnumbered attach.
+- =learn-table= — resolve per [[*Variable detection order]].
+
+* Preflight and validation
+
+** Typed config
+Attach state is *not* added to the managed =ExtraBgpConfig=. That struct stays
+managed-only (=api/types/services.go= keeps =ExternalConnection/Bridge/Vrf/Asn/
+AsnRange/ManualBgpdConfig= and the "connections or bridges required" validation).
+The attach knobs are read directly from OVS/OVN into an internal =attachConfig=
+struct (=bgp/attach.go=): =RouterID= / =LocalASN= / =AdvertiseTable= (from
+=Open_vSwitch= =external_ids=), =LearnTable= (resolved from the router), and per
+port =Peers= (the =microovn-bgp-peers= LRP =external_ids=, parsed by
+=types.ParsePeers= into =[]types.Peer=) plus a derived =LocalIP= transit prefix for
+numbered uplinks. There is no =NeutronConfig= type.
+
+| field            | type     | required? | validation                            |
+|------------------+----------+-----------+---------------------------------------|
+| =RouterID=       | string   | no        | IPv4, non-unspecified (defaulted)     |
+| =LocalASN=       | uint32   | no        | non-zero; ≠ every peer ASN (defaulted)|
+| =AdvertiseTable= | uint32   | attach    | non-zero, ∉ {253..255}, ≠ VRF id      |
+| =LearnTable=     | uint32   | derived   | =dynamic-routing-vrf-id= → =Datapath_Binding.tunnel_key= |
+| =Peers=          | []Peer   | yes       | non-zero ASN ≠ local, unique address; per-mode (IPv6 link-local unnumbered / IPv4 in-transit-prefix numbered) |
+| =LocalIP=        | netip.Prefix | numbered only | the transit prefix containing the IPv4 peers |
+
+Validation happens in =preflightAttach= on the resolved =attachConfig=, not in
+=ExtraBgpConfig.Validate=.
+
+** Preflight (attach mode)
+Per tagged port, before mutating anything:
+
+- central (northd) OVN ≥ 26.03 — parse =northd_internal_version= from
+  NB/SB_Global options (leading =<packages-version>=); define failure as
+  skip-with-error (never hard-fail the reconciler).
+- router =options:chassis= == local chassis,
+- resolve =learn-table=: if =dynamic-routing=true= but =-vrf-id= absent, read the
+  effective id from =Datapath_Binding.tunnel_key= (don't assign a new one — that
+  would recreate the VRF); honour =-vrf-name= only if < IFNAMSIZ,
+- port belongs to the router and is connected to its switch (the 1:1 LSP),
+- port has no existing =routing-protocol-redirect= (a pre-existing =routing-protocols=
+  value is fine — it is recorded and restored, then overwritten to BGP for the
+  duration of the attach),
+- port =mac= explicit and valid,
+- port =options:dynamic-routing-port-name= non-empty and unique across the chassis,
+- attachment veth (=mp<hash>=, keyed off the LRP) and redirect LSP do not already exist.
+
+Addressing is validated every tick (not just for new targets) via
+=validateAttachAddressing=, so an owner editing or adding addressing on a live
+attachment is caught rather than bypassing the new-target-only preflight:
+- peers non-empty, non-zero ASN ≠ local, no duplicates;
+- numbered: the transit prefix is not a /32 (host route); the local and peer
+  addresses are not the network/broadcast address; every peer is IPv4 and inside
+  the prefix; no peer collides with the local transit address;
+- unnumbered: every peer is IPv6 link-local.
+
+* Attachment steps
+
+1. veth pair =mp<hash>b= (host) / =mp<hash>o= (ovs) if absent, hash keyed off the LRP,
+2. host iface =address=<port MAC>=, =master=ovnvrf<learn-table>=, up; ovs iface up,
+   then address the veth per mode: a numbered uplink gets exactly the local
+   transit CIDR (the kernel derives the connected route to the transit prefix,
+   making the IPv4 peer directly reachable) and any stale IPv4 is flushed; an
+   unnumbered uplink carries no IPv4 at all (any leftover is flushed),
+3. =ovs --may-exist add-port <br-int> <ovs> ... external_ids:iface-id=<lsp>=,
+4. update =dynamic-routing-port-mapping= (add =<port-name>=<host-iface>=, preserve rest),
+5. record owner's =routing-protocols= + =ipv6_ra_configs= in the local journal,
+   =nb --may-exist lsp-add <switch> <lsp>= (=lsp-set-addresses unknown=; no ownership
+   tag on the owner's LSP) and set =options:routing-protocols=BGP,BFD=
+   (mirroring the managed path: OVN redirects both, and BIRD answers BFD
+   passively — peers that do not speak BFD are unaffected) +
+   =options:routing-protocol-redirect=<lsp>=. The owner's originals are restored by
+   =restoreOriginalOptions= on detach.
+
+Order: create the LSP before setting =routing-protocol-redirect=. Veth/port-mapping
+persistence at reboot depends on the reconciler (attach uses =ip link add=, not
+netplan) — cold-boot ordering is tested, not assumed.
+
+* BIRD config — branch by mode
+
+Managed uses today's =birdConfTemplate= (=service.go:34=). Attach uses a dedicated
+template: an =advertise-table= kernel protocol (learn /32 originations), a =pipe= of
+defaults into an internal =learned= table, an =egress= kernel protocol writing into
+the VRF (=learn-table=), /32 export with =bgp_med= from =krt_metric=, defaults-only
+import, and one =protocol bgp= block per peer. =routing-protocols=BGP,BFD=. BFD is
+wired in passively like the managed path: a global =protocol bfd { strict bind yes; }=
+stub plus =bfd { passive yes; };= per BGP neighbor, so BFD is only used when a peer
+has it configured.
+
+The per-neighbor block branches on the uplink mode:
+
+- *numbered*: =local <transit-ipv4>;= sourced on the LRP's own transit address
+  (shared with the veth via =routing-protocol-redirect=) and a plain IPv4
+  =neighbor <ipv4> as N= — no =interface=/extended-next-hop (those are the
+  unnumbered mechanisms).
+- *unnumbered*: =interface "<host-veth>";= plus IPv6 =extended next hop=, so the
+  IPv4 routes ride the IPv6 link-local peer.
+
+* Single VRF per chassis (v1) vs multi-VRF
+
+BIRD is not limited to one BGP port/VRF: many =protocol bgp= blocks per instance,
+per-protocol =vrf= for multiple VRFs (or one BIRD instance per VRF). v1 collapses
+to one VRF (=learn-table=) per chassis — one =egress= kernel protocol, one
+=advertise-table=, one =dynamic-routing-port-mapping= story. Per-router VRF is a
+possible v2 (one BIRD instance per VRF + per-VRF scoping), not a redesign.
+
+* Lifecycle — reconciler and ownership
+
+** Reconciler
+A =sync.Once= goroutine started from =OnStart= and after =Bootstrap=/=Join=, gated on
+the switch service, ticking every 30s. It tolerates an offline DB / snap refresh.
+Ownership is the local OVS journal (=microovn-bgp-attached= list); a lost journal is
+re-hydrated via the redirect option (=attachRedirectIsOurs=/=alreadyAttached=).
+
+- edit peers / knobs → re-render + reload BIRD (or re-attach on knob change),
+- remove =microovn-bgp-attach= from a port → detach that uplink,
+- remove =microovn-bgp-setup= from a bridge → tear down BGP on it,
+- remove =microovn-bgp=enabled= → full teardown.
+
+Convergence semantics: BIRD is rewritten only when every previously-attached target
+converges — a transient failure keeps the last rendered config (never drops a live
+peer), a new/preflight-failing target is skipped without blocking, and BIRD is
+stopped (+ config reset, only after a successful stop) only when no local
+attachment remains and the config is attach-generated.
+
+A tagged LRP pinned to another chassis (or none) is skipped here; it will surface in
+=inspect= once that =bgp= check lands (deferred).
+
+** Mutual exclusion
+Managed and attach must not both drive a node. The reconciler skips its tick when
+=HasManagedBgp= is true; managed =EnableService= and =setup bird= refuse when
+=HasAttach= is true. Both are fail-closed on an NB read error (skip / refuse
+rather than risk both paths driving BIRD). Implemented in =bgp/service.go= +
+=bgp/reconciler.go=.
+
+* OVN version requirement
+
+Attach is anchored on =dynamic-routing-vrf-id= (OVN =v26.03.0=):
+
+| feature                                             | first release |
+|-----------------------------------------------------+---------------|
+| =routing-protocol-redirect=                          | 24.09         |
+| =dynamic-routing=, =-port-name=, =-port-mapping=, =-maintain-vrf=, =-vrf-name=, =-redistribute= | 25.03 |
+| =dynamic-routing-vrf-id=                             | 26.03         |
+| =/31= router ports (numbered peer prefixes)          | 26.03.3 / 26.09 |
+| veth-peer discovery (=a8777619f=)                    | 26.09         |
+
+- Minimum **OVN ≥ 26.03 on central (northd) and chassis**; central version asserted
+  via =northd_internal_version= as above.
+- Numbered peering prefers a =/30= point-to-point prefix. A =/31= (RFC 3021) also
+  works but needs central OVN 26.03.3 or 26.09+ (=parseNorthdVersion= reads the
+  patch level; =supportsSlash31LRP= warns an older central rather than failing,
+  because the BGP/BFD session still forms — an archive 26.03.0 central
+  misclassifies the /31 peer as broadcast and can drop peer-sourced routed
+  traffic). A =/32= is rejected as not a real transit prefix.
+- Scope **main + branch-26.03**, with the *full framework backported* to 26.03
+  (markers, =setup bgp=, endpoints, cluster keys — currently main-only).
+- sunbeam 24.03 microovn (with a separate ovn-central 24.03) cannot consume this
+  until central + chassis reach 26.03.
+- 26.09 veth-peer discovery would later drop the owner-set =-port-name= and the
+  =-port-mapping= step (v2 simplification).
+
+* Sequencing / interaction with in-flight work
+
+- Inference snap (OVN-837): =install=/=post-refresh= hooks run =microovn inference
+  auto= and can restart =microovn.switch=, so the reconciler must tolerate
+  transient =ovs-vsctl= failures (retry). =doca-inference= touches no veth/netplan
+  code (no real overlap); the only conflict is =cmd/microovn/main.go= registration.
+- =update-status=/CI =wait_for_snap_idle=: the reconciler is daemon-backed, not
+  hook-triggered; it must not be confused with snap refresh (retry, don't gate).
+
+* Implementation map
+
+| # | change | home |
+|---+--------+------|
+| 1 | internal =attachConfig= + =Peer= type + =types.ParsePeers= (managed =ExtraBgpConfig= stays as-is) | =api/types/services.go= + =microovn/bgp/attach.go= |
+| 2 | attach preflight (central-version check, VRF id/name edge cases, owner-option recording) | =microovn/bgp/attach.go= |
+| 3 | attach + port-mapping (=dynamic-routing-port-mapping=, owner-option restore) | =microovn/bgp/attach.go= |
+| 4 | per-LRP discovery (scan =microovn-bgp-attach=) + switch 2-hop lookup | =microovn/bgp/attach.go= |
+| 5 | rename =microovn-bgp-enabled= → =microovn-bgp-setup= + migrate/drop =-vrf=/=-asn-range=; dqlite =microovn-bgp-arg-*= rename | =api/bgp/endpoints.go= + =api/types/setup_bgp.go= |
+| 6 | mode branch in =EnableService= + BIRD template branch | =microovn/bgp/service.go= |
+| 7 | reconciler goroutine + =disableAttach= + journal rehydration | =microovn/bgp/reconciler.go= + =attach.go= |
+| 8 | mutual-exclusion (fail-closed =HasAttach= / =HasManagedBgp=) + local OVS ownership journal | =microovn/bgp/service.go= + =reconciler.go= + =attach.go= |
+| 9 | =setup bird= (API endpoint + client fn + stdin transport type) + =setup bgp= guard | =microovn/cmd/microovn= + =api/= |
+| 10 | =bird -p= wrapper (=bird=) + =birdc configure= socket retry | =snap/= + =service.go= |
+| 11 | OVN min-version assert (central) + doc | =EnableService= / docs |
+| 12 | numbered peering (=classifyNumbered=, =parseLrpNetworks=, =validateAttachAddressing=, mode-aware =attachUplink= RA/address, =parseNorthdVersion= patch level, =supportsSlash31LRP=) | =microovn/bgp/attach.go= |
+| 13 | =inspect= =bgp= check — DEFERRED (not implemented) | =microovn/inspect/= |
+| 14 | managed teardown refactor: 3-category ownership, guard =lr-del --if-exists=, fix =CleanupVRFs= typo, don't del-br untagged, =microovn-bgp-managed=true=→=<chassis>= (one-way break) | =microovn/bgp/redirect.go= + =netplan.go= |
+| 15 | =neutron.go= — not implemented (=NeutronConfig= removed) | =microovn/bgp/= |
+| 16 | tests: bats key rename (=bgp_exid_data_plane.bats=), attach fixture (unnumbered + numbered, FRR peers, =bird -p= smoke) | =tests/= |
+| 17 | docs: =docs/how-to/bgp.rst= (owner contract + numbered peering sections) | docs |
+
+* Open questions
+
+1. =advertise-table= producer: confirmed as the topology owner / Neutron ovn-agent
+   BGP extension, contract documented — but the exact producer for *non*-Neutron
+   attach is to be named by whoever adopts this.
+2. Reconciler tick length / batch size / backoff bound.
+3. Pin the BIRD source tag (currently untagged =gitlab.nic.cz/labs/bird.git=) or add
+   a =bird -p= CI check on the rendered attach template.
+4. =Gateway_Chassis= vs =options:chassis= scheduling for the pinned router — confirm
+   how a gateway port is scheduled on the local chassis in a real deployment.
