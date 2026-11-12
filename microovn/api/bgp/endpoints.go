@@ -57,6 +57,13 @@ func setupBgpHandler(s microTypes.State, r *http.Request) microTypes.Response {
 			ifaceName = req.Bridge
 		}
 
+		// Mutual exclusion with `setup bgp-attach`, checked before anything is stored.
+		if attachIntent, err := bgp.HasAttachIntent(r.Context(), s); err != nil {
+			return microTypes.InternalError(fmt.Errorf("failed to check for a bgp-attach intent: %w", err))
+		} else if attachIntent {
+			return microTypes.BadRequest(errors.New("bgp-attach is configured; run 'microovn setup bgp-attach disable' before 'setup bgp'"))
+		}
+
 		err = config.SetConfig(r.Context(), s, types.BgpConfigKeyCluster, "true")
 		if err != nil {
 			return microTypes.InternalError(fmt.Errorf("failed to save BGP cluster config: %w", err))

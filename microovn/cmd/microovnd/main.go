@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/canonical/microovn/microovn/api"
+	"github.com/canonical/microovn/microovn/bgp"
 	"github.com/canonical/microovn/microovn/database"
 	"github.com/canonical/microovn/microovn/ovn"
 	"github.com/canonical/microovn/microovn/securitylog"
@@ -103,6 +104,13 @@ func (c *cmdDaemon) Run(_ *cobra.Command, _ []string) error {
 	h.PreRemove = ovn.Leave
 	h.PostRemove = func(ctx context.Context, s types.State, _ bool) error {
 		ovn.Refresh(ctx, s)
+		// The removed member leaves its bgp-attach group: drop its rack label,
+		// free its address and restore its router port. Every remaining member
+		// runs this; the database transaction lets only one of them do it,
+		// and the reconcile tick retries if this fails.
+		if err := bgp.PruneDepartedMembers(ctx, s); err != nil {
+			logger.Warnf("bgp-attach: failed to drop the removed member's rack label: %v", err)
+		}
 		return nil
 	}
 	h.OnStart = ovn.Start

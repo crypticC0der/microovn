@@ -24,6 +24,11 @@ const attachReconcileInterval = 30 * time.Second
 
 var reconcilerOnce sync.Once
 
+// reconcileMu serialises attach passes. The background ticker and
+// `microovn setup bgp-attach` both drive ReconcileAttach/DisableAttach, and two
+// concurrent passes could race on creating or removing the same veth and LSP.
+var reconcileMu sync.Mutex
+
 // StartReconciler starts the attach reconciler goroutine once per daemon
 // process. It is called from several lifecycle hooks (OnStart and after
 // bootstrap/join), guarded by a sync.Once so at most one goroutine runs. The
@@ -51,12 +56,31 @@ func StartReconciler(s microTypes.State) {
 // knobs from OVS/OVN and reconciles the running state to match (attach new,
 // detach removed, re-apply changed, render BIRD). It is safe to call repeatedly.
 func ReconcileAttach(ctx context.Context, s microTypes.State) error {
+	reconcileMu.Lock()
+	defer reconcileMu.Unlock()
+	return reconcileAttach(ctx, s)
+}
+
+func reconcileAttach(ctx context.Context, s microTypes.State) error {
+	// Backstop for the PostRemove hook: drop the rack labels of members that
+	// left the cluster. It only reads when nobody has left.
+	if err := PruneDepartedMembers(ctx, s); err != nil {
+		logger.Warnf("BGP attach: failed to drop departed members' rack labels: %v", err)
+	}
+
 	// Attach only makes sense on a node running the OVS switch. Skip the whole
 	// pass cheaply otherwise, so central-only nodes don't block on the (30s)
 	// switch DB wait every tick and log reconciler failures for a feature they
 	// haven't enabled.
 	if !switchServiceActive(ctx, s) {
 		return nil
+	}
+
+	// Turn a stored `setup bgp-attach` intent into this chassis's markers (or
+	// undo them once the intent is gone). A failure here is logged, not fatal:
+	// hand-stamped markers keep working through the pass below either way.
+	if err := reconcileAttachIntent(ctx, s); err != nil {
+		logger.Warnf("BGP attach intent: %v", err)
 	}
 
 	gate, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", BgpEnableGate)
@@ -268,6 +292,8 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 // DisableAttach tears down all attachments owned by this chassis and stops
 // BIRD. It is the full-teardown path when the enable gate is removed.
 func DisableAttach(ctx context.Context, s microTypes.State) error {
+	reconcileMu.Lock()
+	defer reconcileMu.Unlock()
 	return disableAttach(ctx, s)
 }
 
@@ -344,9 +370,18 @@ func switchServiceActive(ctx context.Context, s microTypes.State) bool {
 	return err == nil && active
 }
 
-// HasAttach reports whether attach mode is enabled on this node: the chassis
-// gate is on and at least one attach marker exists.
+// HasAttach reports whether attach mode is enabled on this node: a bgp-attach
+// intent is stored, or the chassis gate is on and at least one attach marker
+// exists.
 func HasAttach(ctx context.Context, s microTypes.State) (bool, error) {
+	// A stored `setup bgp-attach` intent counts as attach being on, even before
+	// this node has derived its markers from it.
+	if intent, err := HasAttachIntent(ctx, s); err != nil {
+		return false, err
+	} else if intent {
+		return true, nil
+	}
+
 	gate, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", BgpEnableGate)
 	if err != nil {
 		return false, err

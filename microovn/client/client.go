@@ -334,3 +334,55 @@ func SetupBird(ctx context.Context, c microTypes.Client, request types.SetupBird
 
 	return responseData, err
 }
+
+// bgpAttachTimeout covers one member's attach pass (NB/OVS waits, BIRD restart)
+// plus, on the node the operator talks to, waiting for every other member.
+const bgpAttachTimeout = 300 * time.Second
+
+// SetupBgpAttach sets (or dry-runs) one `microovn setup bgp-attach` group.
+// Sent as a cluster notification it only asks that member to converge.
+func SetupBgpAttach(ctx context.Context, c microTypes.Client, request types.SetupBgpAttachRequest) (types.SetupBgpAttachResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, bgpAttachTimeout)
+	defer cancel()
+
+	responseData := types.SetupBgpAttachResponse{}
+	err := c.Query(queryCtx, "POST", types.APIVersion, &url.URL{Path: "bgp/attach"}, request, &responseData)
+	return responseData, err
+}
+
+// DisableBgpAttach removes the bgp-attach group for one leaf peer, or every
+// group when peer is empty (`microovn setup bgp-attach disable [--peer ...]`).
+func DisableBgpAttach(ctx context.Context, c microTypes.Client, peer string) (types.SetupBgpAttachResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, bgpAttachTimeout)
+	defer cancel()
+
+	path := &url.URL{Path: "bgp/attach"}
+	if peer != "" {
+		path.RawQuery = url.Values{"peer": []string{peer}}.Encode()
+	}
+	responseData := types.SetupBgpAttachResponse{}
+	err := c.Query(queryCtx, "DELETE", types.APIVersion, path, nil, &responseData)
+	return responseData, err
+}
+
+// GetBgpAttachStatus returns every stored group and each member's state
+// (`microovn setup bgp-attach status`).
+func GetBgpAttachStatus(ctx context.Context, c microTypes.Client) (types.SetupBgpAttachResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	responseData := types.SetupBgpAttachResponse{}
+	err := c.Query(queryCtx, "GET", types.APIVersion, &url.URL{Path: "bgp/attach"}, nil, &responseData)
+	return responseData, err
+}
+
+// SetBgpAttachRack sets or clears one member's rack label
+// (`microovn setup bgp-attach label`).
+func SetBgpAttachRack(ctx context.Context, c microTypes.Client, request types.SetBgpAttachRackRequest) (types.SetupBgpAttachResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, bgpAttachTimeout)
+	defer cancel()
+
+	responseData := types.SetupBgpAttachResponse{}
+	err := c.Query(queryCtx, "POST", types.APIVersion, &url.URL{Path: "bgp/attach/rack"}, request, &responseData)
+	return responseData, err
+}
