@@ -14,6 +14,37 @@ the MicroOVN, for more information about what's happening under the hood, see:
    supported going forward.
 
 
+Run BIRD standalone
+-------------------
+
+The BIRD routing daemon that MicroOVN uses for BGP is shipped as a standalone
+snap service, ``microovn.bird``, so it can be run and configured without the rest
+of MicroOVN's BGP machinery — the same way ``microovn.switch`` runs Open vSwitch
+on its own.
+
+.. code-block:: none
+
+   sudo snap start microovn.bird
+
+BIRD reads its configuration from ``/var/snap/microovn/common/data/bird/bird.conf``
+and is controlled with the ``microovn.birdc`` client:
+
+.. code-block:: none
+
+   microovn.birdc show status
+   microovn.birdc configure
+
+This is the first step of the BGP integration ladder: run BIRD on its own, then
+set the configuration keys described below, and finally enable the attach
+capabilities that let MicroOVN drive BIRD on your behalf.
+
+.. important::
+
+   When BGP is enabled (managed or attach mode), MicroOVN takes over the BIRD
+   configuration file and overwrites it. Running a standalone BIRD *and*
+   MicroOVN-managed BGP on the same host is not supported in v1.
+
+
 Enable BGP integration
 ----------------------
 

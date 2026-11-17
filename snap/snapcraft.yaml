@@ -82,6 +82,7 @@ apps:
     command: commands/bird.start
     daemon: simple
     install-mode: disable
+    stop-command: commands/bird.stop
     plugs:
       - network
       - network-bind

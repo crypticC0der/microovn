@@ -1,5 +1,20 @@
 #!/bin/sh
+set -eu
+
 # Load the environment
 . "${SNAP}/bird.env"
+
+# BIRD does not create its own runtime/data directories; ensure they exist so
+# the pid file and control socket have a home.
+mkdir -p "$BIRD_RUN_DIR" "$BIRD_DATA_DIR"
+
+# Seed the default config if none exists (fresh install or a deleted data dir).
+if [ ! -f "$BIRD_CONFIG" ]; then
+    cp "${SNAP}/etc/bird/bird.conf" "$BIRD_CONFIG"
+fi
+
+# Validate the config before starting so an invalid config fails fast with a
+# clear error instead of the service dying after launch.
+"${SNAP}/usr/sbin/bird" -p -c "$BIRD_CONFIG"
 
 exec "${SNAP}/usr/sbin/bird" -f -c "$BIRD_CONFIG" -P "$BIRD_PID" -s "$BIRD_SOCKET"

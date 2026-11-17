@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+# Load the environment
+. "${SNAP}/bird.env"
+
+# Gracefully stop BIRD via its control socket, if it is running.
+if [ -S "$BIRD_SOCKET" ]; then
+    "${SNAP}/usr/sbin/birdc" -s "$BIRD_SOCKET" down
+fi
