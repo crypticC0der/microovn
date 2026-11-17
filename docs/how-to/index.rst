@@ -18,3 +18,4 @@ a basic understanding of OVN.
    service-control
    datapath-only-mode
    bgp
+   inference

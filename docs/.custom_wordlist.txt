@@ -124,3 +124,12 @@ veth
 vSwitch
 yaml
 stdin
+BlueField
+ConnectX
+DOCA
+GiB
+IOMMU
+Mellanox
+OFED
+hugepages
+netdev
