@@ -257,6 +257,41 @@ func TestAttachBirdConfigImportPolicy(t *testing.T) {
 	}
 }
 
+func TestAttachBirdConfigAdvertiseEqualsLearn(t *testing.T) {
+	cfg := attachConfig{
+		RouterID:       "192.0.2.1",
+		LocalASN:       65101,
+		AdvertiseTable: 10,
+		LearnTable:     10,
+		Targets: []attachTarget{
+			{RouterPort: "external-port", Peers: []types.Peer{{Address: "fe80::1", ASN: 65002}}},
+		},
+	}
+	bird := attachBirdConfig(cfg)
+
+	// The advertise == learn case collapses to a single kernel protocol: it is
+	// the only way to both learn the owner-produced /32s and export the
+	// BGP-imported default into the same VRF, since BIRD allows only one kernel
+	// syncer per table (a separate advertisements+egress pair would wedge the
+	// egress protocol in "start" and never install the default route).
+	if strings.Count(bird, "protocol kernel ") != 1 {
+		t.Fatalf("expected exactly 1 kernel protocol in the advertise==learn render, got:\n%s", bird)
+	}
+	if strings.Contains(bird, "protocol pipe") || strings.Contains(bird, "protocol kernel egress") || strings.Contains(bird, "ipv4 table learned;") {
+		t.Fatalf("advertise==learn render must not emit a pipe/secondary learned table or an egress protocol:\n%s", bird)
+	}
+	for _, want := range []string{
+		"kernel table 10",
+		"import filter { if net.len = 32 then accept; reject; };",
+		"export filter { if source = RTS_BGP && (net = 0.0.0.0/0) then accept; reject; };",
+		`proto = "advertisements"`,
+	} {
+		if !strings.Contains(bird, want) {
+			t.Errorf("advertise==learn render missing %q:\n%s", want, bird)
+		}
+	}
+}
+
 func TestParseLrpNetworks(t *testing.T) {
 	cases := []struct {
 		in   string

@@ -41,10 +41,6 @@ const (
 	// BgpAttachMarker triggers attach mode when set to "true" on a
 	// Logical_Router_Port.
 	BgpAttachMarker = "microovn-bgp-attach"
-	// BgpEnableGate is the chassis-wide enable gate stored on Open_vSwitch.
-	// Attach is only active when this is "enabled" and at least one LRP carries
-	// BgpAttachMarker.
-	BgpEnableGate = "microovn-bgp"
 	// BgpPeersKey lists the eBGP peers on an attach Logical_Router_Port.
 	BgpPeersKey = "microovn-bgp-peers"
 )
@@ -64,6 +60,18 @@ const (
 const (
 	attachOrigRoutingProtocols = "microovn-bgp-orig-routing-protocols."
 	attachOrigRA               = "microovn-bgp-orig-ipv6-ra."
+)
+
+// Open_vSwitch external-id key prefixes used to remember the owner's pre-attach
+// dynamic-routing plumbing values that microovn now owns (v2), so detach can
+// restore them. The router-level options (dynamic-routing, vrf-id) are keyed by
+// the logical router name; the LRP-level options (maintain-vrf, port-name) are
+// keyed by the LRP name.
+const (
+	attachOrigDynamicRouting = "microovn-bgp-orig-dynamic-routing."
+	attachOrigVrfID          = "microovn-bgp-orig-vrf-id."
+	attachOrigMaintainVrf    = "microovn-bgp-orig-maintain-vrf."
+	attachOrigPortName       = "microovn-bgp-orig-port-name."
 )
 
 // attachOrigEmpty is the sentinel stored in the journal when the owner had no
@@ -86,7 +94,10 @@ type attachTarget struct {
 	Switch string
 	// MAC is the explicit LRP mac.
 	MAC string
-	// PortName is options:dynamic-routing-port-name on the LRP (owner set).
+	// PortName is options:dynamic-routing-port-name on the LRP. MicroOVN
+	// owns this key in v2: it is computed (attachPortName), not read from the
+	// owner, and it is the key in the chassis-local dynamic-routing-port-mapping
+	// that ties the LRP to the attachment veth.
 	PortName string
 	// Peers are the eBGP peers from BgpPeersKey on the LRP.
 	Peers []types.Peer
@@ -451,6 +462,171 @@ func clearOriginalOptions(ctx context.Context, s microTypes.State, lrp string) e
 	return nil
 }
 
+// ownOption journals (once) the current value of a scalar NB map option and sets
+// it to want, so detach can restore the owner's original. It is idempotent: the
+// journal entry is written only on the first call, so a half-done attach that is
+// re-run never overwrites the owner's original with microovn's own value. The
+// journal key is the OVS external-id key (journalPrefix concatenated with the
+// object name, e.g. attachOrigMaintainVrf+routerPort).
+func ownOption(ctx context.Context, s microTypes.State, journalKey, table, row, option, want string) error {
+	existing, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", journalKey)
+	if err != nil {
+		return err
+	}
+	if existing == "" {
+		prior, err := nbGetIfExists(ctx, s, table, row, "options:"+option)
+		if err != nil {
+			return err
+		}
+		prior = strings.TrimSpace(prior)
+		if prior == "" {
+			prior = attachOrigEmpty
+		}
+		if _, err := ovnCmd.VSCtl(ctx, s, "set", "Open_vSwitch", ".", "external_ids:"+journalKey+"="+prior); err != nil {
+			return err
+		}
+	}
+	if _, err := ovnCmd.NBCtlCluster(ctx, s, ovnCmd.DefaultDBStateWait, "--if-exists", "set", table, row, "options:"+option+"="+want); err != nil {
+		return err
+	}
+	return nil
+}
+
+// restoreOption puts back the journaled pre-attach value of a scalar NB map
+// option, reporting whether microovn actually owned that option. A missing
+// journal entry means microovn never owned the option (e.g. an owner-set
+// dynamic-routing-vrf-id was respected, not touched), so it is left alone and
+// owned=false is returned. A journaled sentinel means the owner had none, so the
+// option is removed. A journal read failure is an error (never treated as "owner
+// had none"); the caller clears the journal afterward only once the whole detach
+// has succeeded.
+func restoreOption(ctx context.Context, s microTypes.State, journalKey, table, row, option string) (bool, error) {
+	orig, err := VsctlGetIfExists(ctx, s, "Open_vSwitch", ".", "external-ids", journalKey)
+	if err != nil {
+		return false, fmt.Errorf("failed to read journal %s: %w", journalKey, err)
+	}
+	if orig == "" {
+		return false, nil
+	}
+	if orig == attachOrigEmpty {
+		if _, err := ovnCmd.NBCtlCluster(ctx, s, ovnCmd.DefaultDBStateWait, "--if-exists", "remove", table, row, "options", option); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	_, err = ovnCmd.NBCtlCluster(ctx, s, ovnCmd.DefaultDBStateWait, "--if-exists", "set", table, row, "options:"+option+"="+orig)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// clearOptionJournal removes a single ownership-journal key from Open_vSwitch.
+func clearOptionJournal(ctx context.Context, s microTypes.State, journalKey string) error {
+	if _, err := ovnCmd.VSCtl(ctx, s, "remove", "Open_vSwitch", ".", "external_ids", journalKey); err != nil {
+		return fmt.Errorf("failed to clear journal %s: %w", journalKey, err)
+	}
+	return nil
+}
+
+// ownDynamicRouting sets the dynamic-routing plumbing microovn owns in v2, so
+// the owner no longer has to hand-configure it. The router gains
+// dynamic-routing=true and (only when absent) the shared chassis learn-table id;
+// the LRP gains dynamic-routing-maintain-vrf=true and the computed
+// dynamic-routing-port-name. Each prior value is journaled so detach restores
+// it.
+func ownDynamicRouting(ctx context.Context, s microTypes.State, cfg attachConfig, target attachTarget) error {
+	rKey := attachOrigDynamicRouting + target.Router
+	if err := ownOption(ctx, s, rKey, "Logical_Router", target.Router, "dynamic-routing", "true"); err != nil {
+		return fmt.Errorf("failed to set dynamic-routing on router %s: %w", target.Router, err)
+	}
+
+	// dynamic-routing-vrf-id is respected when the owner set one; it is written
+	// only when absent so a deployment can pin a deterministic learn-table.
+	if current, err := nbGetIfExists(ctx, s, "Logical_Router", target.Router, "options:dynamic-routing-vrf-id"); err != nil {
+		return err
+	} else if strings.TrimSpace(current) == "" {
+		if err := ownOption(ctx, s, attachOrigVrfID+target.Router, "Logical_Router", target.Router, "dynamic-routing-vrf-id", strconv.FormatUint(uint64(cfg.LearnTable), 10)); err != nil {
+			return fmt.Errorf("failed to set dynamic-routing-vrf-id on router %s: %w", target.Router, err)
+		}
+	}
+
+	mvKey := attachOrigMaintainVrf + target.RouterPort
+	if err := ownOption(ctx, s, mvKey, "Logical_Router_Port", target.RouterPort, "dynamic-routing-maintain-vrf", "true"); err != nil {
+		return fmt.Errorf("failed to set dynamic-routing-maintain-vrf on router port %s: %w", target.RouterPort, err)
+	}
+
+	pnKey := attachOrigPortName + target.RouterPort
+	if err := ownOption(ctx, s, pnKey, "Logical_Router_Port", target.RouterPort, "dynamic-routing-port-name", target.PortName); err != nil {
+		return fmt.Errorf("failed to set dynamic-routing-port-name on router port %s: %w", target.RouterPort, err)
+	}
+
+	return nil
+}
+
+// restoreDynamicRouting restores the dynamic-routing plumbing microovn owned.
+// The LRP-level options (maintain-vrf, port-name) are always restored for the
+// port being detached. The router-level options (dynamic-routing, vrf-id) are
+// restored only when no other owned attachment remains on that router, so
+// detaching one of several LRPs on a shared router does not break the others.
+func restoreDynamicRouting(ctx context.Context, s microTypes.State, router, routerPort string) error {
+	// LRP-level options are always owned per-port, so restore + clear them for
+	// the port being detached.
+	mvKey := attachOrigMaintainVrf + routerPort
+	if owned, err := restoreOption(ctx, s, mvKey, "Logical_Router_Port", routerPort, "dynamic-routing-maintain-vrf"); err != nil {
+		return err
+	} else if owned {
+		if err := clearOptionJournal(ctx, s, mvKey); err != nil {
+			return err
+		}
+	}
+
+	pnKey := attachOrigPortName + routerPort
+	if owned, err := restoreOption(ctx, s, pnKey, "Logical_Router_Port", routerPort, "dynamic-routing-port-name"); err != nil {
+		return err
+	} else if owned {
+		if err := clearOptionJournal(ctx, s, pnKey); err != nil {
+			return err
+		}
+	}
+
+	// Router-level options are shared across every LRP of the router, so only
+	// restore them once the last owned LRP on this router is gone.
+	owned, err := ownedAttachPorts(ctx, s)
+	if err != nil {
+		return err
+	}
+	for _, other := range owned {
+		if other == routerPort {
+			continue
+		}
+		if otherRouter, _, err := resolveTargetRouter(ctx, s, other); err == nil && otherRouter == router {
+			return nil
+		}
+	}
+
+	rKey := attachOrigDynamicRouting + router
+	if owned, err := restoreOption(ctx, s, rKey, "Logical_Router", router, "dynamic-routing"); err != nil {
+		return err
+	} else if owned {
+		if err := clearOptionJournal(ctx, s, rKey); err != nil {
+			return err
+		}
+	}
+
+	// dynamic-routing-vrf-id is only owned (journaled) when it was absent, so an
+	// owner-set value has no journal entry and is left untouched.
+	vKey := attachOrigVrfID + router
+	if owned, err := restoreOption(ctx, s, vKey, "Logical_Router", router, "dynamic-routing-vrf-id"); err != nil {
+		return err
+	} else if owned {
+		if err := clearOptionJournal(ctx, s, vKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // centralSupportsAttach reports whether the central (northd) side is new enough
 // to drive attach mode. Attach is anchored on options:dynamic-routing-vrf-id,
 // first released in OVN 26.03. It never hard-fails: an unknown/unparseable
@@ -631,12 +807,11 @@ func resolveAttachTarget(ctx context.Context, s microTypes.State, lrp string, ro
 	}
 	target.MAC = strings.ToLower(strings.TrimSpace(mac))
 
-	// dynamic-routing-port-name (owner set).
-	portName, err := nbGetIfExists(ctx, s, "Logical_Router_Port", lrp, "options:dynamic-routing-port-name")
-	if err != nil {
-		return target, err
-	}
-	target.PortName = strings.TrimSpace(portName)
+	// dynamic-routing-port-name is owned by microovn (v2): compute it rather
+	// than read it from the owner. It is the opaque key in the chassis-local
+	// dynamic-routing-port-mapping, so it only needs to be deterministic and
+	// per-chassis unique — attachPortName provides both.
+	target.PortName = attachPortName(chassis, lrp)
 
 	// Peers.
 	peersRaw, err := nbGetIfExists(ctx, s, "Logical_Router_Port", lrp, "external_ids:"+BgpPeersKey)
@@ -800,42 +975,87 @@ func readAttachKnobs(ctx context.Context, s microTypes.State) (routerID string, 
 	return routerID, asn, advertise, imp, nil
 }
 
-// resolveLearnTable derives the VRF table id for a router. The id is normally
-// recorded in options:dynamic-routing-vrf-id (set by OVN when it created the
-// VRF). When it is absent but dynamic-routing is enabled, the effective id is
-// the router's Datapath_Binding.tunnel_key (read-only; never assign so as not
-// to churn the VRF). If neither is available, the owner has not set up dynamic
-// routing and attach cannot proceed.
-func resolveLearnTable(ctx context.Context, s microTypes.State, router string) (uint32, error) {
+// knownLearnTable returns the VRF table id a router already resolves to, and
+// whether that id is determinable without microovn allocating one. It is
+// read-only (never assigns a table): the id is either the owner-set
+// options:dynamic-routing-vrf-id, or — when the owner already enabled dynamic
+// routing without a vrf-id — the router's Datapath_Binding.tunnel_key (OVN's
+// implicit VRF table id; never assign so as not to churn the VRF). known is
+// false when the router has neither, meaning microovn must provision the
+// dynamic-routing plumbing and allocate the table itself.
+func knownLearnTable(ctx context.Context, s microTypes.State, router string) (uint32, bool, error) {
 	raw, err := nbGetIfExists(ctx, s, "Logical_Router", router, "options:dynamic-routing-vrf-id")
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	raw = strings.TrimSpace(raw)
 	if raw != "" {
 		n, err := strconv.ParseUint(raw, 10, 32)
 		if err != nil || n == 0 {
-			return 0, fmt.Errorf("router %s has invalid dynamic-routing-vrf-id %q", router, raw)
+			return 0, false, fmt.Errorf("router %s has invalid dynamic-routing-vrf-id %q", router, raw)
 		}
-		return uint32(n), nil
+		return uint32(n), true, nil
 	}
 
 	dr, err := nbGetIfExists(ctx, s, "Logical_Router", router, "options:dynamic-routing")
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if dr == "true" {
 		key, err := datapathTunnelKey(ctx, s, router)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if key == 0 {
-			return 0, fmt.Errorf("router %s has no Datapath_Binding tunnel_key", router)
+			return 0, false, fmt.Errorf("router %s has no Datapath_Binding tunnel_key", router)
 		}
-		return key, nil
+		return key, true, nil
 	}
 
-	return 0, fmt.Errorf("owner must set options:dynamic-routing-vrf-id (or options:dynamic-routing=true) on router %s", router)
+	return 0, false, nil
+}
+
+// allocateLearnTable picks a chassis-local VRF table id for the shared
+// learn-table. It scans the kernel's in-use routing/VRF tables so the chosen id
+// does not collide with an existing VRF.
+func allocateLearnTable(ctx context.Context, s microTypes.State) (uint32, error) {
+	idStr, err := findAvailableVrfTableID(ctx, s)
+	if err != nil {
+		return 0, err
+	}
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil || id == 0 {
+		return 0, fmt.Errorf("invalid auto-selected VRF table id %q", idStr)
+	}
+	return uint32(id), nil
+}
+
+// resolveChassisLearnTable resolves the single learn-table id for this chassis's
+// attachments. v2 keeps the single-VRF-per-chassis model: every target must end
+// up on the same table. A router with an owner-set vrf-id (or an already-enabled
+// dynamic-routing tunnel_key) pins the value; a router with neither adopts that
+// same value (microovn provisions it). If none determine it, microovn allocates
+// one. Conflicting deterministic values are an error.
+func resolveChassisLearnTable(ctx context.Context, s microTypes.State, targets []attachTarget) (uint32, error) {
+	var learn uint32
+	for _, t := range targets {
+		id, known, err := knownLearnTable(ctx, s, t.Router)
+		if err != nil {
+			return 0, err
+		}
+		if !known {
+			continue
+		}
+		if learn == 0 {
+			learn = id
+		} else if id != learn {
+			return 0, fmt.Errorf("attach targets span multiple VRF tables (%d and %d); single VRF per chassis is required", id, learn)
+		}
+	}
+	if learn != 0 {
+		return learn, nil
+	}
+	return allocateLearnTable(ctx, s)
 }
 
 // datapathTunnelKey looks up the Datapath_Binding.tunnel_key for a logical
@@ -937,34 +1157,14 @@ func preflightAttach(ctx context.Context, s microTypes.State, cfg attachConfig, 
 		return fmt.Errorf("router %s is not pinned to local chassis %q", target.Router, s.Name())
 	}
 
-	// dynamic-routing is owner-set and required: attach relies on OVN having
-	// created the VRF and redirect plumbing.
-	dr, err := nbGetIfExists(ctx, s, "Logical_Router", target.Router, "options:dynamic-routing")
-	if err != nil {
+	// A router whose learn-table is already determinable (owner-set vrf-id, or an
+	// already-enabled dynamic-routing tunnel_key) must resolve to the chassis
+	// learn-table selected up front, otherwise the target would silently fly on
+	// the wrong VRF. A router with neither adopts the chassis table (microovn
+	// provisions it in attachUplink), so it never conflicts here.
+	if tLearn, known, err := knownLearnTable(ctx, s, target.Router); err != nil {
 		return err
-	}
-	if dr != "true" {
-		return fmt.Errorf("owner must set options:dynamic-routing=true on router %s", target.Router)
-	}
-
-	// dynamic-routing-maintain-vrf is owner-set and required: it is what makes
-	// ovn-controller create ovnvrf<N> on this chassis.
-	mv, err := nbGetIfExists(ctx, s, "Logical_Router_Port", target.RouterPort, "options:dynamic-routing-maintain-vrf")
-	if err != nil {
-		return err
-	}
-	if mv != "true" {
-		return fmt.Errorf("owner must set options:dynamic-routing-maintain-vrf=true on router port %s", target.RouterPort)
-	}
-
-	// v1 collapses to a single VRF per chassis: every target's router must
-	// resolve to the same learn table as the one already selected, otherwise a
-	// target would silently fly on the wrong VRF.
-	tLearn, err := resolveLearnTable(ctx, s, target.Router)
-	if err != nil {
-		return err
-	}
-	if tLearn != cfg.LearnTable {
+	} else if known && tLearn != cfg.LearnTable {
 		return fmt.Errorf("router %s VRF table %d differs from the chassis VRF %d", target.Router, tLearn, cfg.LearnTable)
 	}
 
@@ -991,33 +1191,6 @@ func preflightAttach(ctx context.Context, s microTypes.State, cfg attachConfig, 
 	// MAC must be explicit and valid.
 	if parsed, err := net.ParseMAC(target.MAC); err != nil || len(parsed) != 6 {
 		return fmt.Errorf("router port %s must have an explicit, valid MAC (got %q)", target.RouterPort, target.MAC)
-	}
-
-	// dynamic-routing-port-name must be set and non-empty.
-	if target.PortName == "" {
-		return fmt.Errorf("router port %s is missing options:dynamic-routing-port-name", target.RouterPort)
-	}
-
-	// dynamic-routing-port-name must be unique across THIS chassis: it is the
-	// key in Open_vSwitch's (chassis-local) dynamic-routing-port-mapping, so two
-	// ports pinned to the same chassis sharing it would clobber each other's
-	// mapping entry. The same name on a different chassis is fine.
-	portNamePorts, err := ovnCmd.NBCtlCluster(ctx, s, ovnCmd.DefaultDBStateWait, "--bare", "--columns=name",
-		"find", "Logical_Router_Port", "options:dynamic-routing-port-name="+target.PortName)
-	if err != nil {
-		return err
-	}
-	for _, name := range parseOvnFind(portNamePorts) {
-		if name == target.RouterPort {
-			continue
-		}
-		_, otherChassis, err := resolveTargetRouter(ctx, s, name)
-		if err != nil {
-			return fmt.Errorf("router port %s shares dynamic-routing-port-name %q with unresolvable port %s: %w", target.RouterPort, target.PortName, name, err)
-		}
-		if otherChassis == s.Name() {
-			return fmt.Errorf("router port %s has a duplicate dynamic-routing-port-name %q on chassis %q", target.RouterPort, target.PortName, s.Name())
-		}
 	}
 
 	// The attachment veth pair and redirect LSP must not already exist.
@@ -1096,6 +1269,20 @@ func attachConverged(ctx context.Context, s microTypes.State, cfg attachConfig, 
 	// The LRP must carry the redirect to our LSP.
 	redirect, err := nbGetIfExists(ctx, s, "Logical_Router_Port", target.RouterPort, "options:routing-protocol-redirect")
 	if err != nil || strings.TrimSpace(redirect) != lsp {
+		return false
+	}
+
+	// The dynamic-routing plumbing microovn owns (v2) must still be in place. A
+	// topology owner that rewrites the router/LRP options (e.g. a Neutron resync
+	// or the ovn-bgp plugin touching the router options) can drop it, so drift
+	// here fails convergence and is repaired by ownDynamicRouting in attachUplink.
+	if dr, err := nbGetIfExists(ctx, s, "Logical_Router", target.Router, "options:dynamic-routing"); err != nil || strings.TrimSpace(dr) != "true" {
+		return false
+	}
+	if mv, err := nbGetIfExists(ctx, s, "Logical_Router_Port", target.RouterPort, "options:dynamic-routing-maintain-vrf"); err != nil || strings.TrimSpace(mv) != "true" {
+		return false
+	}
+	if pn, err := nbGetIfExists(ctx, s, "Logical_Router_Port", target.RouterPort, "options:dynamic-routing-port-name"); err != nil || strings.TrimSpace(pn) != target.PortName {
 		return false
 	}
 
@@ -1195,9 +1382,17 @@ func attachUplink(ctx context.Context, s microTypes.State, cfg attachConfig, tar
 
 	// Record ownership in the local journal FIRST. If any later step fails (VRF
 	// not ready, add-port, mapping, NB commit), the LRP is still journaled, so
-	// the next tick re-runs this idempotently (or disableAttach tears it down)
-	// instead of wedging.
+	// the next tick re-runs this idempotently instead of wedging.
 	if err := addOwnedPort(ctx, s, target.RouterPort); err != nil {
+		return err
+	}
+
+	// Own the dynamic-routing plumbing (v2): microovn sets dynamic-routing=true,
+	// the learn-table vrf-id (when absent), maintain-vrf and the computed
+	// port-name, instead of requiring the owner to have pre-configured them.
+	// Journaling is idempotent, so a half-done attach that is retried never
+	// overwrites the owner's originals.
+	if err := ownDynamicRouting(ctx, s, cfg, target); err != nil {
 		return err
 	}
 
@@ -1316,19 +1511,21 @@ func attachUplink(ctx context.Context, s microTypes.State, cfg attachConfig, tar
 
 // detachPort removes the resources created for a single attachment. Ownership
 // is established by the caller (the LRP was in the local journal), and the
-// veth/LSP/redirect names are deterministic, so removal is by name with
-// --if-exists rather than by an external_ids ownership tag. It re-reads the
-// dynamic-routing-port-name before mutating anything so it can restore the
-// mapping entry without a prior discovery pass.
+// veth/LSP/redirect/port-name are deterministic, so removal is by name with
+// --if-exists rather than by an external_ids ownership tag.
 func detachPort(ctx context.Context, s microTypes.State, routerPort string) error {
 	host, ovs := attachInterfaces(routerPort)
 	lsp := attachPortName(s.Name(), routerPort)
+	portName := attachPortName(s.Name(), routerPort)
 
-	portName, err := nbGetIfExists(ctx, s, "Logical_Router_Port", routerPort, "options:dynamic-routing-port-name")
-	if err != nil {
-		return err
+	// The router owning this port is needed to restore the router-level
+	// dynamic-routing options once the last owned LRP on it is gone. If the
+	// owner already deleted the router/port, there is nothing to restore at the
+	// router level; proceed with the resource teardown (best-effort).
+	router, _, routerErr := resolveTargetRouter(ctx, s, routerPort)
+	if routerErr != nil {
+		router = ""
 	}
-	portName = strings.TrimSpace(portName)
 
 	// Remove our redirect option if it still points at our LSP (or is unset),
 	// then restore the owner's routing-protocols and ipv6_ra_configs originals.
@@ -1376,6 +1573,15 @@ func detachPort(ctx context.Context, s microTypes.State, routerPort string) erro
 	if err := removeOwnedPort(ctx, s, routerPort); err != nil {
 		return err
 	}
+
+	// Restore the dynamic-routing plumbing microovn owned (LRP options always;
+	// router options only when no other owned LRP remains on that router), then
+	// clear the routing-protocols/RA original-options journal.
+	if routerErr == nil {
+		if err := restoreDynamicRouting(ctx, s, router, routerPort); err != nil {
+			return err
+		}
+	}
 	return clearOriginalOptions(ctx, s, routerPort)
 }
 
@@ -1419,16 +1625,32 @@ func updatePortMapping(ctx context.Context, s microTypes.State, key, value strin
 // metric preserved as BGP MED. BFD is wired in the same passive way as the
 // managed path: a global strict-bind BFD socket plus per-neighbor "passive yes",
 // so BFD is only used when the peer has it configured.
+//
+// When advertise-table == learn-table (the default), the two kernel protocols
+// would share one kernel table, and BIRD allows only one kernel syncer per
+// table — the second would wedge in "start" and never install the default route
+// into the VRF. In that case the render collapses to a single kernel protocol
+// that both learns the owner-produced /32s (for advertisement) and exports the
+// BGP-imported routes into the VRF, with no pipe or secondary "learned" table.
 func attachBirdConfig(cfg attachConfig) string {
 	var b strings.Builder
 	vrfName := getVrfName(strconv.FormatUint(uint64(cfg.LearnTable), 10))
 	importLine := cfg.ImportPolicy.importLine()
 	pipeFilter := cfg.ImportPolicy.pipeExportFilter()
 	fmt.Fprintf(&b, "# Generated by microovn attach mode.\nlog syslog all;\nrouter id %s;\nprotocol device {}\n", cfg.RouterID)
-	fmt.Fprintf(&b, `protocol bfd {
- strict bind yes;
+	fmt.Fprintf(&b, "protocol bfd {\n strict bind yes;\n}\n")
+	if cfg.AdvertiseTable == cfg.LearnTable {
+		fmt.Fprintf(&b, `protocol kernel advertisements {
+ kernel table %d;
+ learn;
+ ipv4 {
+  import filter { if net.len = 32 then accept; reject; };
+  export filter { %s };
+ };
 }
-protocol kernel advertisements {
+`, cfg.LearnTable, pipeFilter)
+	} else {
+		fmt.Fprintf(&b, `protocol kernel advertisements {
  kernel table %d;
  learn;
  ipv4 { import filter { if net.len = 32 then accept; reject; }; export none; };
@@ -1445,6 +1667,7 @@ protocol kernel egress {
  ipv4 { table learned; import none; export all; };
 }
 `, cfg.AdvertiseTable, pipeFilter, cfg.LearnTable)
+	}
 	for i, target := range cfg.Targets {
 		host, _ := attachInterfaces(target.RouterPort)
 		for j, p := range target.Peers {

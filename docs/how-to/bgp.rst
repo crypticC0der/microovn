@@ -217,11 +217,14 @@ Instead, MicroOVN can *attach* BIRD to an existing logical router port that the
 topology owner created, via OVN's native ``options:routing-protocol-redirect``,
 without owning any L2/L3 topology of its own.
 
-Attach mode is driven by two external-id markers:
+Attach mode is driven by per-port intent, with no chassis-wide enable gate:
+MicroOVN runs attach because a router pinned to the local chassis carries the
+attach marker.
 
-- ``microovn-bgp=enabled`` on ``Open_vSwitch`` is the chassis-wide enable gate.
 - ``microovn-bgp-attach=true`` on a ``Logical_Router_Port`` marks that port as an
-  attachment point.
+  attachment point (the mode marker).
+- ``microovn-bgp-peers=<asn>@<address>[, ...]`` on the same port lists the eBGP
+  peer(s) — the only per-node value the owner supplies.
 
 MicroOVN records which ports it has attached to in a single local
 ``Open_vSwitch`` external-id: ``microovn-bgp-attached`` holds a comma-separated
@@ -236,9 +239,10 @@ The chassis-wide knobs live on ``Open_vSwitch`` ``external_ids``:
 - ``microovn-bgp-router-id`` — BIRD router id (optional; auto-generated).
 - ``microovn-bgp-advertise-table`` — the kernel table the topology owner /
   BGP producer populates with chassis-local ``/32`` host routes (with a kernel
-  metric) that BIRD advertises out. **Required** in attach mode; it is never
-  auto-generated because a table nobody writes to would silently advertise
-  nothing.
+  metric) that BIRD advertises out. Optional: it defaults to the learn-table
+  (the VRF MicroOVN allocated), which is where Neutron's native
+  ``dynamic-routing-redistribute=nat`` writes FIP ``/32``\ s. Set a distinct
+  value only to use a separate producer table.
 - ``microovn-bgp-import-filter`` — which routes BIRD accepts *from* attach
   peers (optional). One of:
 
@@ -273,20 +277,23 @@ Per-port configuration lives on the tagged ``Logical_Router_Port``
 Owner contract
 ~~~~~~~~~~~~~~
 
-The topology owner remains responsible for the router, switch, ports and the
-provider bridge. Before stamping ``microovn-bgp-attach=true``, the owner must
-have configured:
+The topology owner remains responsible for the router, switch, ports, provider
+bridge, and the addressing those ports carry. Before stamping
+``microovn-bgp-attach=true``, the owner must have configured:
 
 - the router pinned to the local chassis (``options:chassis=<chassis>``),
-- ``options:dynamic-routing=true`` and ``options:dynamic-routing-vrf-id=<id>``
-  on the router (or, if ``-vrf-id`` is absent, ``dynamic-routing=true`` alone —
-  MicroOVN will read the effective id from the router's datapath),
 - an explicit MAC (not ``auto``) on the LRP,
-- ``options:dynamic-routing-maintain-vrf=true`` on the LRP (this is what makes
-  ``ovn-controller`` create the ``ovnvrf<N>`` device on the chassis),
-- a ``options:dynamic-routing-port-name=<name>`` on the LRP, unique across the
-  local chassis (pinned ports on other chassis may reuse the name, since the
-  ``dynamic-routing-port-mapping`` it keys is chassis-local).
+- for numbered peering, the transit IPv4 on the LRP's ``networks`` (see
+  *Numbered peering*), and the peer in ``microovn-bgp-peers``.
+
+Everything else is provisioned by MicroOVN itself: ``dynamic-routing=true``
+and — when absent — ``dynamic-routing-vrf-id`` on the router, plus
+``dynamic-routing-maintain-vrf=true`` and the computed
+``dynamic-routing-port-name`` on the LRP. An owner-set
+``dynamic-routing-vrf-id`` is respected (so a deployment can pin a
+deterministic learn-table); the values MicroOVN writes are journaled and
+restored on detach. The owner no longer hand-configures the dynamic-routing
+plumbing per node.
 
 Numbered peering
 ~~~~~~~~~~~~~~~~
@@ -386,12 +393,21 @@ OVN IDL resync does) drops that marker; MicroOVN then sees no desired target and
 tears the attachment down, but its ownership journal in the local OVS DB
 survives. Neutron/Sunbeam compatibility is not yet validated.
 
+Similarly, while attached the owner must not rewrite the dynamic-routing
+plumbing MicroOVN provisions (``dynamic-routing`` / ``dynamic-routing-vrf-id``
+on the router, ``dynamic-routing-maintain-vrf`` / ``dynamic-routing-port-name``
+on the LRP). ``dynamic-routing``, ``maintain-vrf`` and ``port-name`` are
+verified-and-repaired by convergence, so a rewrite of those is re-stamped on the
+next tick; a rewritten ``dynamic-routing-vrf-id`` (a change of learn-table
+mid-attach) is not converged — the attachment veth stays in the original VRF —
+so keep that value stable for the life of the attachment.
+
 Minimum OVN version: attach mode requires OVN 26.03 or newer on the central
 (northd) side. The chassis always runs the version shipped by the MicroOVN snap.
 The dynamic-routing primitives the attach uses (``routing-protocol-redirect``,
-``dynamic-routing-port-name``, ``-maintain-vrf``) arrived in 25.03; the gate is
-pinned at 26.03 because that is where ``options:dynamic-routing-vrf-id`` was
-introduced, which attach anchors its VRF-id discovery on.
+``dynamic-routing-port-name``, ``-maintain-vrf``) arrived in 25.03; the minimum
+is pinned at 26.03 because that is where ``options:dynamic-routing-vrf-id`` was
+introduced, which attach anchors its VRF-id provisioning on.
 
 .. note::
 
@@ -400,8 +416,8 @@ introduced, which attach anchors its VRF-id discovery on.
    external-id. The two stores are separate. The managed path's enable trigger is
    the ``microovn-bgp-setup`` ``Open_vSwitch`` external-id (a ``bool``-like flag,
    formerly ``microovn-bgp-enabled``); attach mode instead uses the
-   ``microovn-bgp`` gate plus the per-``Logical_Router_Port``
-   ``microovn-bgp-attach`` marker.
+   per-``Logical_Router_Port`` ``microovn-bgp-attach`` marker (there is no
+   chassis-wide enable gate).
 
 Disable BGP integration
 -----------------------
