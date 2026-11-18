@@ -11,8 +11,14 @@ import (
 	"strings"
 )
 
-// sysfsPCIDir is the sysfs location that exposes one directory per PCI device.
-const sysfsPCIDir = "/sys/bus/pci/devices"
+// Sysfs and procfs locations that expose the hardware relevant to engine
+// selection.
+const (
+	sysfsPCIDir       = "/sys/bus/pci/devices"
+	sysfsHugepagesDir = "/sys/kernel/mm/hugepages"
+	sysfsIOMMUDir     = "/sys/class/iommu"
+	procModulesFile   = "modules"
+)
 
 // PCIDevice is a single PCI device discovered on the host.
 type PCIDevice struct {
@@ -24,27 +30,54 @@ type PCIDevice struct {
 // Hardware is a summary of the host hardware that is relevant to OVS engine
 // selection.
 type Hardware struct {
-	Architecture string
-	PCIDevices   []PCIDevice
+	Architecture  string
+	PCIDevices    []PCIDevice
+	KernelModules []string
+	HugepageKiBs  []uint64
+	IOMMUEnabled  bool
+}
+
+// detectionFilesystems groups the host filesystems the detectors read from
+// under a common name, so tests can substitute a fake filesystem.
+type detectionFilesystems struct {
+	PCI      fs.FS
+	Proc     fs.FS
+	Hugepage fs.FS
+	IOMMU    fs.FS
 }
 
 // Detect enumerates the host hardware relevant to engine selection.
 func Detect() (*Hardware, error) {
-	return detect(os.DirFS(sysfsPCIDir), runtime.GOARCH)
+	return detect(detectionFilesystems{
+		PCI:      os.DirFS(sysfsPCIDir),
+		Proc:     os.DirFS("/proc"),
+		Hugepage: os.DirFS(sysfsHugepagesDir),
+		IOMMU:    os.DirFS(sysfsIOMMUDir),
+	}, runtime.GOARCH)
 }
 
-// detect enumerates hardware from the given sysfs root and build architecture.
+// detect enumerates hardware from the given filesystems and build architecture.
 // The architecture is supplied by the caller so that the result reflects the
 // platform the binaries were built for (which, for a snap, is the host).
-func detect(fsys fs.FS, arch string) (*Hardware, error) {
-	devices, err := scanPCI(fsys)
+//
+// Each source is probed best-effort: an unreadable source yields an empty
+// result rather than failing the whole scan, so a host that cannot be fully
+// inspected conservatively fails readiness checks instead of crashing.
+func detect(fsys detectionFilesystems, arch string) (*Hardware, error) {
+	devices, err := scanPCI(fsys.PCI)
 	if err != nil {
 		return nil, err
 	}
 
+	modules := scanKernelModules(fsys.Proc)
+	hugepages := scanHugepages(fsys.Hugepage)
+
 	return &Hardware{
-		Architecture: arch,
-		PCIDevices:   devices,
+		Architecture:  arch,
+		PCIDevices:    devices,
+		KernelModules: modules,
+		HugepageKiBs:  hugepages,
+		IOMMUEnabled:  iommuEnabled(fsys.IOMMU),
 	}, nil
 }
 
@@ -94,6 +127,97 @@ func readPCIDevice(fsys fs.FS, name string) (PCIDevice, error) {
 		DeviceID:    uint16(device),
 		DeviceClass: uint16(class >> 8),
 	}, nil
+}
+
+// scanKernelModules returns the names of the currently loaded kernel modules
+// by reading /proc/modules. An unreadable file yields an empty result.
+func scanKernelModules(fsys fs.FS) []string {
+	data, err := fs.ReadFile(fsys, procModulesFile)
+	if err != nil {
+		return nil
+	}
+
+	modules := make([]string, 0)
+
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			modules = append(modules, fields[0])
+		}
+	}
+
+	return modules
+}
+
+// scanHugepages returns the sizes, in KiB, of every hugepage size that has at
+// least one page reserved, reading the /sys/kernel/mm/hugepages directory. A
+// size is only reported when the boot layer provisioned at least one page of
+// it; hugepage sizes with no pages reserved are omitted, as are directories
+// whose contents cannot be read.
+func scanHugepages(fsys fs.FS) []uint64 {
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return nil
+	}
+
+	sizes := make([]uint64, 0)
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		sizeKiB, ok := parseHugepageDirName(entry.Name())
+		if !ok {
+			continue
+		}
+
+		data, err := fs.ReadFile(fsys, path.Join(entry.Name(), "nr_hugepages"))
+		if err != nil {
+			continue
+		}
+
+		reserved, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil || reserved == 0 {
+			continue
+		}
+
+		sizes = append(sizes, sizeKiB)
+	}
+
+	return sizes
+}
+
+// parseHugepageDirName extracts the size in KiB from a hugepage directory name
+// such as "hugepages-1048576kB".
+func parseHugepageDirName(name string) (uint64, bool) {
+	rest, ok := strings.CutPrefix(name, "hugepages-")
+	if !ok {
+		return 0, false
+	}
+
+	size, ok := strings.CutSuffix(rest, "kB")
+	if !ok {
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseUint(size, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	return parsed, true
+}
+
+// iommuEnabled reports whether an IOMMU is present and enabled, detected by a
+// non-empty /sys/class/iommu directory.
+func iommuEnabled(fsys fs.FS) bool {
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return false
+	}
+
+	return len(entries) > 0
 }
 
 // readHexAttribute reads a sysfs file containing a hexadecimal value such as

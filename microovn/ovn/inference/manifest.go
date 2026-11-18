@@ -10,7 +10,8 @@ package inference
 // Device describes a single hardware requirement of an engine.
 //
 // Only a subset of the inference snap device schema is currently interpreted:
-// CPU architecture and PCI vendor/device/class identifiers.
+// CPU architecture, PCI vendor/device/class identifiers, loaded kernel
+// modules, reserved hugepage sizes and IOMMU enablement.
 type Device struct {
 	Type         string `yaml:"type"`
 	Bus          string `yaml:"bus,omitempty"`
@@ -18,6 +19,8 @@ type Device struct {
 	VendorID     string `yaml:"vendor-id,omitempty"`
 	DeviceID     string `yaml:"device-id,omitempty"`
 	DeviceClass  string `yaml:"device-class,omitempty"`
+	Name         string `yaml:"name,omitempty"`
+	Size         string `yaml:"size,omitempty"`
 }
 
 // Devices groups hardware requirements into mandatory (Allof) and alternative

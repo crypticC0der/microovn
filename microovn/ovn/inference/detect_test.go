@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"io/fs"
 	"testing"
 	"testing/fstest"
 )
@@ -57,5 +58,93 @@ func TestScanPCISkipsIncompleteDevices(t *testing.T) {
 
 	if len(devices) != 0 {
 		t.Fatalf("expected incomplete devices to be skipped, got %d", len(devices))
+	}
+}
+
+func TestScanKernelModules(t *testing.T) {
+	fsys := fstest.MapFS{
+		"modules": {Data: []byte("mlx5_core 123456 0 - Live 0x0000000\ntun 40960 0 - Live 0x0000000\n")},
+	}
+
+	modules := scanKernelModules(fsys)
+	if len(modules) != 2 {
+		t.Fatalf("expected 2 modules, got %d", len(modules))
+	}
+
+	if modules[0] != "mlx5_core" || modules[1] != "tun" {
+		t.Fatalf("expected mlx5_core and tun, got %v", modules)
+	}
+}
+
+func TestScanKernelModulesUnreadable(t *testing.T) {
+	if modules := scanKernelModules(fstest.MapFS{}); len(modules) != 0 {
+		t.Fatalf("expected no modules from an empty filesystem, got %v", modules)
+	}
+}
+
+func TestScanHugepages(t *testing.T) {
+	fsys := fstest.MapFS{
+		"hugepages-1048576kB/nr_hugepages": {Data: []byte("8\n")},
+		"hugepages-2048kB/nr_hugepages":    {Data: []byte("0\n")},
+	}
+
+	sizes := scanHugepages(fsys)
+	if len(sizes) != 1 {
+		t.Fatalf("expected 1 reserved hugepage size, got %d (%v)", len(sizes), sizes)
+	}
+
+	if sizes[0] != 1024*1024 {
+		t.Fatalf("expected 1 GiB (%d KiB), got %d", 1024*1024, sizes[0])
+	}
+}
+
+func TestScanHugepagesSkipsUnreservedSizes(t *testing.T) {
+	fsys := fstest.MapFS{
+		"hugepages-1048576kB/nr_hugepages": {Data: []byte("0\n")},
+	}
+
+	if sizes := scanHugepages(fsys); len(sizes) != 0 {
+		t.Fatalf("expected unreserved hugepage sizes to be skipped, got %v", sizes)
+	}
+}
+
+func TestScanHugepagesUnreadable(t *testing.T) {
+	if sizes := scanHugepages(fstest.MapFS{}); len(sizes) != 0 {
+		t.Fatalf("expected no hugepages from an empty filesystem, got %v", sizes)
+	}
+}
+
+func TestParseHugepageDirName(t *testing.T) {
+	cases := map[string]uint64{
+		"hugepages-1048576kB": 1024 * 1024,
+		"hugepages-2048kB":    2048,
+	}
+
+	for name, want := range cases {
+		got, ok := parseHugepageDirName(name)
+		if !ok {
+			t.Errorf("parseHugepageDirName(%q) failed", name)
+			continue
+		}
+
+		if got != want {
+			t.Errorf("parseHugepageDirName(%q) = %d, want %d", name, got, want)
+		}
+	}
+
+	for _, name := range []string{"", "foo", "hugepages-", "hugepages-XkB"} {
+		if _, ok := parseHugepageDirName(name); ok {
+			t.Errorf("parseHugepageDirName(%q) unexpectedly succeeded", name)
+		}
+	}
+}
+
+func TestIOMMUEnabled(t *testing.T) {
+	if iommuEnabled(fstest.MapFS{"ivhd0": {Data: []byte(""), Mode: fs.ModeDir}}) == false {
+		t.Fatal("expected IOMMU enabled with a populated directory")
+	}
+
+	if iommuEnabled(fstest.MapFS{}) {
+		t.Fatal("expected IOMMU disabled with an empty directory")
 	}
 }

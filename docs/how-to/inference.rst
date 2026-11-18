@@ -110,7 +110,7 @@ It requires the NVIDIA DOCA software stack on the host itself:
 
 - NVIDIA DOCA-OFED kernel drivers for the device.
 - ``doca-init`` completing the accelerated datapath setup.
-- 1 GiB huge pages reserved for the datapath.
+- 1 GiB huge pages reserved by the boot layer for the datapath.
 - IOMMU enabled.
 
 The host must be rebooted after the drivers are installed for the modules to
@@ -119,5 +119,16 @@ not available and Open vSwitch continues on the kernel or netdev datapath
 even though the DOCA build is running.
 
 The ``ovs-doca`` engine is only considered on ``amd64`` hosts with a
-compatible device (PCI vendor ``0x15b3``). On every other host ``ovs`` is
-selected.
+compatible device (PCI vendor ``0x15b3``) *and* the DOCA prerequisites above in
+place: the ``mlx5_core`` kernel driver loaded, 1 GiB huge pages reserved and an
+IOMMU enabled. If any prerequisite is missing the engine does not match and
+``ovs`` is selected instead; ``microovn inference list`` shows the MISSING
+column with exactly which prerequisites the host is short of.
+
+.. note::
+
+   The ``mlx5_core`` check is a proxy: the gate cannot yet tell the NVIDIA
+   DOCA-OFED build of ``mlx5_core`` apart from the stock kernel driver, so a
+   host with the stock driver and the other prerequisites would still select
+   the DOCA engine and then fall back to a non-accelerated datapath. Detecting
+   the DOCA-OFED build specifically is tracked as follow-up work.

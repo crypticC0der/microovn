@@ -2,6 +2,7 @@ package inference
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -15,6 +16,9 @@ type Match struct {
 	Engine     Engine
 	Score      int
 	Compatible bool
+	// Missing holds a human-readable description of each requirement that
+	// was not satisfied. It is empty when the engine is compatible.
+	Missing []string
 }
 
 // Score evaluates an engine against the host hardware.
@@ -23,7 +27,9 @@ type Match struct {
 // selection: mandatory requirements (Allof) must all be satisfied and
 // alternative requirements (Anyof) must have at least one match. The score
 // reflects how specifically the requirements match the host, so that engines
-// targeting more specific hardware rank above generic ones.
+// targeting more specific hardware rank above generic ones. Whenever a
+// requirement is not met the reason is recorded in Missing so the caller can
+// report exactly which prerequisites a host lacks.
 func Score(engine Engine, hardware *Hardware) Match {
 	match := Match{Engine: engine, Compatible: true}
 
@@ -39,14 +45,14 @@ func Score(engine Engine, hardware *Hardware) Match {
 		score, ok := matchDevice(device, hardware)
 		if !ok {
 			match.Compatible = false
-			match.Score = 0
-			return match
+			match.Missing = append(match.Missing, deviceLabel(device))
+			continue
 		}
 
 		match.Score += score
 	}
 
-	if alternatives > 0 {
+	if match.Compatible && alternatives > 0 {
 		found := false
 
 		for _, device := range engine.Devices.Anyof {
@@ -61,9 +67,15 @@ func Score(engine Engine, hardware *Hardware) Match {
 
 		if !found {
 			match.Compatible = false
-			match.Score = 0
-			return match
+
+			for _, device := range engine.Devices.Anyof {
+				match.Missing = append(match.Missing, deviceLabel(device))
+			}
 		}
+	}
+
+	if !match.Compatible {
+		match.Score = 0
 	}
 
 	return match
@@ -109,9 +121,82 @@ func matchDevice(device Device, hardware *Hardware) (int, bool) {
 		return 1, true
 	case "pci", "":
 		return matchPCI(device, hardware.PCIDevices)
+	case "kernel-module":
+		return matchKernelModule(device, hardware.KernelModules)
+	case "hugepages":
+		return matchHugepages(device, hardware.HugepageKiBs)
+	case "iommu":
+		if hardware.IOMMUEnabled {
+			return 1, true
+		}
+
+		return 0, false
 	default:
 		return 0, false
 	}
+}
+
+// matchKernelModule reports whether the named kernel module is loaded.
+func matchKernelModule(device Device, modules []string) (int, bool) {
+	if device.Name == "" {
+		return 0, false
+	}
+
+	for _, module := range modules {
+		if module == device.Name {
+			return 2, true
+		}
+	}
+
+	return 0, false
+}
+
+// matchHugepages reports whether hugepages of at least the requested size are
+// reserved on the host.
+func matchHugepages(device Device, sizes []uint64) (int, bool) {
+	sizeKiB, ok := parseSize(device.Size)
+	if !ok {
+		return 0, false
+	}
+
+	for _, present := range sizes {
+		if present == sizeKiB {
+			return 2, true
+		}
+	}
+
+	return 0, false
+}
+
+// deviceLabel returns a short human-readable description of a device
+// requirement, used to report which prerequisites a host is missing.
+func deviceLabel(device Device) string {
+	switch device.Type {
+	case "cpu":
+		return fmt.Sprintf("cpu architecture %s", device.Architecture)
+	case "pci", "":
+		return pciLabel(device)
+	case "kernel-module":
+		return fmt.Sprintf("kernel module %s", device.Name)
+	case "hugepages":
+		return fmt.Sprintf("%s hugepages", device.Size)
+	case "iommu":
+		return "IOMMU"
+	default:
+		return device.Type
+	}
+}
+
+func pciLabel(device Device) string {
+	if device.VendorID == "" {
+		return "PCI device"
+	}
+
+	if device.DeviceID == "" {
+		return fmt.Sprintf("PCI device vendor %s", device.VendorID)
+	}
+
+	return fmt.Sprintf("PCI device %s:%s", device.VendorID, device.DeviceID)
 }
 
 // matchPCI reports whether any host PCI device satisfies the given
@@ -148,6 +233,51 @@ func matchPCI(device Device, devices []PCIDevice) (int, bool) {
 	}
 
 	return 0, false
+}
+
+// parseSize parses a memory size into its value in KiB. It accepts a bare
+// number of KiB or a number with a unit suffix: k, m or g (case-insensitive,
+// with optional B or iB). For example "2048kB", "2G" and "1048576" all parse
+// to their value in KiB.
+func parseSize(value string) (uint64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+
+	multiplier := uint64(1)
+	number := value
+
+	end := len(value)
+	for end > 0 && !isDigit(value[end-1]) {
+		end--
+	}
+
+	if end < len(value) {
+		number = value[:end]
+
+		switch strings.ToUpper(value[end:]) {
+		case "K", "KB", "KIB":
+			multiplier = 1
+		case "M", "MB", "MIB":
+			multiplier = 1024
+		case "G", "GB", "GIB":
+			multiplier = 1024 * 1024
+		default:
+			return 0, false
+		}
+	}
+
+	parsed, err := strconv.ParseUint(strings.TrimSpace(number), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	return parsed * multiplier, true
+}
+
+func isDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
 // parseID parses an optional hexadecimal identifier such as "0x8086". An empty

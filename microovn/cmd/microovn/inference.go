@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -51,7 +52,7 @@ func (c *cmdInference) listCommand() *cobra.Command {
 
 			writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
-			if _, err := fmt.Fprintln(writer, "ENGINE\tCOMPATIBLE\tSCORE\tACTIVE\tSUMMARY"); err != nil {
+			if _, err := fmt.Fprintln(writer, "ENGINE\tCOMPATIBLE\tSCORE\tACTIVE\tMISSING\tSUMMARY"); err != nil {
 				return err
 			}
 
@@ -68,8 +69,13 @@ func (c *cmdInference) listCommand() *cobra.Command {
 					marker = "*"
 				}
 
-				_, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\n",
-					engine.Name, compatible, match.Score, marker, engine.Summary)
+				missing := "-"
+				if len(match.Missing) > 0 {
+					missing = strings.Join(match.Missing, ", ")
+				}
+
+				_, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\t%s\n",
+					engine.Name, compatible, match.Score, marker, missing, engine.Summary)
 				if err != nil {
 					return err
 				}

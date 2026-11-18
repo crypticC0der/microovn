@@ -6,9 +6,13 @@ devices:
   allof:
     - type: cpu
       architecture: amd64
-  anyof:
     - type: pci
       vendor-id: "0x15b3"
+    - type: kernel-module
+      name: mlx5_core
+    - type: hugepages
+      size: 1G
+    - type: iommu
 runtime: ovs-doca
 components:
   - ovs-doca
