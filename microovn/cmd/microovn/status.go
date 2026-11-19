@@ -11,6 +11,8 @@ import (
 	"github.com/canonical/microcluster/v3/microcluster"
 	"github.com/canonical/microovn/microovn/api/types"
 	ovnCmd "github.com/canonical/microovn/microovn/ovn/cmd"
+	"github.com/canonical/microovn/microovn/ovn/inference"
+	"github.com/canonical/microovn/microovn/ovn/paths"
 	"github.com/spf13/cobra"
 
 	microTypes "github.com/canonical/microcluster/v3/microcluster/types"
@@ -77,6 +79,8 @@ func (c *cmdStatus) Run(_ *cobra.Command, _ []string) error {
 	reportOvsdbSchemaStatus(m, &cli, ovnCmd.OvsdbTypeNBLocal)
 	reportOvsdbSchemaStatus(m, &cli, ovnCmd.OvsdbTypeSBLocal)
 
+	reportEngineStatus()
+
 	//Check certificates status and report expired ones
 	localHostname, err := os.Hostname()
 	if err != nil {
@@ -98,6 +102,38 @@ func (c *cmdStatus) Run(_ *cobra.Command, _ []string) error {
 	printCertsSummary(&expectedCertificates)
 
 	return nil
+}
+
+// reportEngineStatus prints the locally active OVS engine and the host's DOCA
+// readiness. Hardware inspection is best-effort: if it cannot be performed the
+// relevant section is skipped rather than failing the whole status command.
+func reportEngineStatus() {
+	active, err := inference.Active()
+	if err != nil {
+		return
+	}
+
+	activeName := active
+	if activeName == "" {
+		activeName = "none"
+	}
+
+	fmt.Println("OVS engine summary:")
+	fmt.Printf("  Active engine: %s\n", activeName)
+
+	engines, err := inference.LoadEngines(paths.EnginesDir())
+	if err != nil {
+		return
+	}
+
+	hardware, err := inference.Detect()
+	if err != nil {
+		return
+	}
+
+	if summary := inference.AssessDoca(engines, hardware).Summarise(); summary != "" {
+		fmt.Printf("  DOCA: %s\n", summary)
+	}
 }
 
 // reportOvsdbSchemaStatus fetches currently active schema version and list of expected schema version from each
