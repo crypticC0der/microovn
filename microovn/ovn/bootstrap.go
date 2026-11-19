@@ -160,6 +160,11 @@ func Bootstrap(ctx context.Context, s microTypes.State, initConfig map[string]st
 		if err != nil {
 			return err
 		}
+
+		err = configureDocaDatapath(ctx, s)
+		if err != nil {
+			return err
+		}
 	}
 
 	err = dpu.DPUSetup(ctx, s)
