@@ -17,7 +17,7 @@ environment:
 package-repositories:
   - type: apt
     architectures: [amd64]
-    url: http://linux.mellanox.com/public/repo/doca/3.5.0/ubuntu26.04/x86_64/
+    url: http://linux.mellanox.com/public/repo/doca/3.4.0/ubuntu26.04/x86_64/
     key-id: 70454E6BF5D9C2D3B78709E8DC726C5E41B9CC50
 
 slots:
