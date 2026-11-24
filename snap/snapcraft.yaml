@@ -19,6 +19,10 @@ package-repositories:
     architectures: [amd64]
     url: http://linux.mellanox.com/public/repo/doca/3.4.0/ubuntu26.04/x86_64/
     key-id: 70454E6BF5D9C2D3B78709E8DC726C5E41B9CC50
+  - type: apt
+    architectures: [arm64]
+    url: http://linux.mellanox.com/public/repo/doca/3.4.0/ubuntu26.04/arm64-sbsa/
+    key-id: 70454E6BF5D9C2D3B78709E8DC726C5E41B9CC50
 
 slots:
   ovn-certificates:
@@ -329,12 +333,11 @@ parts:
   ovs-doca:
     plugin: nil
     stage-packages:
-      - to amd64:
-        - doca-openvswitch-switch
-        - collectx-clxapi
-        - libnuma1
-        - libibumad3
-        - libibmad5
+      - doca-openvswitch-switch
+      - collectx-clxapi
+      - libnuma1
+      - libibumad3
+      - libibmad5
     organize:
       usr/lib/openvswitch-switch/ovs-vswitchd: (component/ovs-doca)/bin/ovs-vswitchd
       usr/lib/*/libmlx5.so*: (component/ovs-doca)/lib/
@@ -368,14 +371,18 @@ parts:
       # The DOCA openvswitch packages ship their own init/default files that
       # collide with the Ubuntu openvswitch-switch staged by the `ovn` part.
       - -etc/*
-    override-pull: &amd64-only |
-      if [ "${CRAFT_ARCH_BUILD_FOR}" != "amd64" ]; then
-        exit 0
-      fi
-      craftctl default
-    override-build: *amd64-only
-    override-stage: *amd64-only
-    override-prime: *amd64-only
+    override-pull: &doca-only |
+      case "${CRAFT_ARCH_BUILD_FOR}" in
+        amd64|arm64)
+          craftctl default
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+    override-build: *doca-only
+    override-stage: *doca-only
+    override-prime: *doca-only
 
   # Main part
   microovn:
