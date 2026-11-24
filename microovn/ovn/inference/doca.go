@@ -58,7 +58,7 @@ func findDocaEngine(engines []Engine) *Engine {
 }
 
 func docaCapable(hardware *Hardware) bool {
-	if hardware.Architecture != "amd64" {
+	if hardware.Architecture != "amd64" && hardware.Architecture != "arm64" {
 		return false
 	}
 

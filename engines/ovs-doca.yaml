@@ -16,3 +16,23 @@ devices:
 runtime: ovs-doca
 components:
   - ovs-doca
+---
+name: ovs-doca
+summary: Open vSwitch with the DOCA accelerated datapath (DPU / BlueField)
+vendor: Canonical Ltd
+grade: stable
+devices:
+  allof:
+    - type: cpu
+      architecture: arm64
+      device: "BlueField-3 DPU"
+    - type: pci
+      vendor-id: "0x15b3"
+    - type: kernel-module
+      name: mlx5_core
+    - type: hugepages
+      size: 1G
+    - type: iommu
+runtime: ovs-doca
+components:
+  - ovs-doca
