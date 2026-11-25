@@ -59,6 +59,44 @@ func TestAssessDocaNoDocaEngine(t *testing.T) {
 	}
 }
 
+func TestAssessDocaDpu(t *testing.T) {
+	engines := []Engine{{Name: "ovs-doca-dpu", Devices: dpuDevices()}}
+
+	readiness := AssessDoca(engines, dpuHardware())
+	if !readiness.Capable {
+		t.Fatal("expected a DOCA-capable DPU")
+	}
+
+	if !readiness.Ready {
+		t.Fatalf("expected the DPU to be ready, got missing %v", readiness.Missing)
+	}
+
+	if !UseDocaDatapath("ovs-doca-dpu", readiness) {
+		t.Fatal("expected the DPU engine to request the DOCA datapath")
+	}
+}
+
+func TestDocaDpuNoHugepagesRequired(t *testing.T) {
+	engines := []Engine{
+		{Name: "ovs-doca", Devices: docaDevices()},
+		{Name: "ovs-doca-dpu", Devices: dpuDevices()},
+	}
+
+	// Arm64 DPU hardware with no hugepages reserved still selects the DPU
+	// engine, which does not require them.
+	hardware := dpuHardware()
+	hardware.HugepageKiBs = nil
+
+	engine, ok := findDocaEngine(engines, hardware)
+	if !ok {
+		t.Fatal("expected a DOCA engine to match the DPU hardware")
+	}
+
+	if engine.Name != "ovs-doca-dpu" {
+		t.Fatalf("expected the DPU engine, got %q", engine.Name)
+	}
+}
+
 func TestUseDocaDatapath(t *testing.T) {
 	if !UseDocaDatapath("ovs-doca", DocaReadiness{Capable: true, Ready: true}) {
 		t.Fatal("expected DOCA datapath for an active, ready DOCA engine")
