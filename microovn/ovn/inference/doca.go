@@ -3,27 +3,19 @@ package inference
 import "strings"
 
 // DocaEngineName identifies the engine that provides the DOCA-accelerated
-// datapath on a host with a ConnectX NIC (SmartNIC offload).
+// datapath, used on both amd64 hosts with a ConnectX NIC and arm64 BlueField
+// DPUs.
 const DocaEngineName = "ovs-doca"
 
-// DocaDpuEngineName identifies the engine that provides the DOCA-accelerated
-// datapath on a BlueField DPU.
-const DocaDpuEngineName = "ovs-doca-dpu"
-
 // docaPCIVendorID is the PCI vendor id of Mellanox ConnectX and BlueField
-// network devices, shared by all DOCA engines.
+// network devices.
 const docaPCIVendorID = uint16(0x15b3)
-
-// IsDocaEngine reports whether name identifies a DOCA-accelerated engine.
-func IsDocaEngine(name string) bool {
-	return name == DocaEngineName || name == DocaDpuEngineName
-}
 
 // DocaReadiness summarises how close a host is to being able to run the DOCA
 // datapath.
 type DocaReadiness struct {
-	// Capable is true when the host has DOCA-capable hardware: an amd64 CPU
-	// and a Mellanox ConnectX NIC, or a BlueField DPU.
+	// Capable is true when the host has DOCA-capable hardware: an amd64 or
+	// arm64 CPU with a Mellanox ConnectX NIC or BlueField DPU.
 	Capable bool
 	// Ready is true when every DOCA prerequisite (driver, hugepages, IOMMU)
 	// is satisfied. It is only meaningful when Capable is true.
@@ -37,12 +29,8 @@ type DocaReadiness struct {
 // the host's DOCA readiness. It returns a zero-value readiness (not capable)
 // when no DOCA engine is present.
 func AssessDoca(engines []Engine, hardware *Hardware) DocaReadiness {
-	if !docaCapable(hardware) {
-		return DocaReadiness{}
-	}
-
-	engine, ok := findDocaEngine(engines, hardware)
-	if !ok {
+	engine, ok := findDocaEngine(engines)
+	if !ok || !docaCapable(hardware) {
 		return DocaReadiness{}
 	}
 
@@ -55,29 +43,19 @@ func AssessDoca(engines []Engine, hardware *Hardware) DocaReadiness {
 }
 
 // UseDocaDatapath reports whether the accelerated DOCA datapath should be
-// used: the active engine is a DOCA engine and the host is DOCA-ready.
+// used: the active engine is the DOCA engine and the host is DOCA-ready.
 func UseDocaDatapath(activeEngine string, readiness DocaReadiness) bool {
-	return IsDocaEngine(activeEngine) && readiness.Ready
+	return activeEngine == DocaEngineName && readiness.Ready
 }
 
-// findDocaEngine returns the DOCA engine that best matches the host hardware.
-func findDocaEngine(engines []Engine, hardware *Hardware) (*Engine, bool) {
-	var best *Engine
-	bestScore := -1
-
+func findDocaEngine(engines []Engine) (*Engine, bool) {
 	for i := range engines {
-		if !IsDocaEngine(engines[i].Name) {
-			continue
-		}
-
-		match := Score(engines[i], hardware)
-		if match.Score > bestScore {
-			best = &engines[i]
-			bestScore = match.Score
+		if engines[i].Name == DocaEngineName {
+			return &engines[i], true
 		}
 	}
 
-	return best, best != nil
+	return nil, false
 }
 
 func docaCapable(hardware *Hardware) bool {

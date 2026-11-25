@@ -26,19 +26,34 @@ func iommuRequirement() Device {
 }
 
 func docaDevices() Devices {
-	return Devices{Allof: []Device{
-		cpuRequirement("amd64"),
-		pciRequirement("0x15b3"),
-		kernelModuleRequirement("mlx5_core"),
-		hugepagesRequirement("2M", 4096),
-		iommuRequirement(),
-	}}
+	return Devices{
+		Allof: []Device{
+			pciRequirement("0x15b3"),
+			kernelModuleRequirement("mlx5_core"),
+			hugepagesRequirement("2M", 4096),
+			iommuRequirement(),
+		},
+		Anyof: []Device{
+			cpuRequirement("amd64"),
+			cpuRequirement("arm64"),
+		},
+	}
 }
 
 func docaHardware() *Hardware {
 	return &Hardware{
 		Architecture:  "amd64",
 		PCIDevices:    []PCIDevice{{VendorID: 0x15b3, DeviceID: 0x1015, DeviceClass: 0x0200}},
+		KernelModules: []string{"mlx5_core"},
+		Hugepages:     []Hugepage{{SizeKiB: 2048, Reserved: 4096}},
+		IOMMUEnabled:  true,
+	}
+}
+
+func dpuHardware() *Hardware {
+	return &Hardware{
+		Architecture:  "arm64",
+		PCIDevices:    []PCIDevice{{VendorID: 0x15b3, DeviceID: 0xa2da, DeviceClass: 0x0604}},
 		KernelModules: []string{"mlx5_core"},
 		Hugepages:     []Hugepage{{SizeKiB: 2048, Reserved: 4096}},
 		IOMMUEnabled:  true,
@@ -202,25 +217,5 @@ func TestParseSize(t *testing.T) {
 		if _, ok := parseSize(input); ok {
 			t.Errorf("parseSize(%q) unexpectedly succeeded", input)
 		}
-	}
-}
-
-func dpuDevices() Devices {
-	return Devices{Allof: []Device{
-		cpuRequirement("arm64"),
-		pciRequirement("0x15b3"),
-		kernelModuleRequirement("mlx5_core"),
-		hugepagesRequirement("2M", 4096),
-		iommuRequirement(),
-	}}
-}
-
-func dpuHardware() *Hardware {
-	return &Hardware{
-		Architecture:  "arm64",
-		PCIDevices:    []PCIDevice{{VendorID: 0x15b3, DeviceID: 0xa2da, DeviceClass: 0x0604}},
-		KernelModules: []string{"mlx5_core"},
-		Hugepages:     []Hugepage{{SizeKiB: 2048, Reserved: 4096}},
-		IOMMUEnabled:  true,
 	}
 }

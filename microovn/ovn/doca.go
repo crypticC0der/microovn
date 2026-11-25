@@ -25,7 +25,7 @@ func configureDocaDatapath(ctx context.Context, s microTypes.State) error {
 		return nil
 	}
 
-	if !inference.IsDocaEngine(active) {
+	if active != inference.DocaEngineName {
 		return nil
 	}
 

@@ -4,8 +4,6 @@ vendor: Canonical Ltd
 grade: stable
 devices:
   allof:
-    - type: cpu
-      architecture: amd64
     - type: pci
       vendor-id: "0x15b3"
     - type: kernel-module
@@ -14,6 +12,11 @@ devices:
       size: 2M
       num: 4096
     - type: iommu
+  anyof:
+    - type: cpu
+      architecture: amd64
+    - type: cpu
+      architecture: arm64
 runtime: ovs-doca
 components:
   - ovs-doca
