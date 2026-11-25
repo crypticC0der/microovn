@@ -11,7 +11,8 @@ package inference
 //
 // Only a subset of the inference snap device schema is currently interpreted:
 // CPU architecture, PCI vendor/device/class identifiers, loaded kernel
-// modules, reserved hugepage sizes and IOMMU enablement.
+// modules, reserved hugepage sizes (with an optional minimum page count) and
+// IOMMU enablement.
 type Device struct {
 	Type         string `yaml:"type"`
 	Bus          string `yaml:"bus,omitempty"`
@@ -21,6 +22,7 @@ type Device struct {
 	DeviceClass  string `yaml:"device-class,omitempty"`
 	Name         string `yaml:"name,omitempty"`
 	Size         string `yaml:"size,omitempty"`
+	Num          uint64 `yaml:"num,omitempty"`
 }
 
 // Devices groups hardware requirements into mandatory (Allof) and alternative

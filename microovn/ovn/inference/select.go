@@ -124,7 +124,7 @@ func matchDevice(device Device, hardware *Hardware) (int, bool) {
 	case "kernel-module":
 		return matchKernelModule(device, hardware.KernelModules)
 	case "hugepages":
-		return matchHugepages(device, hardware.HugepageKiBs)
+		return matchHugepages(device, hardware.Hugepages)
 	case "iommu":
 		if hardware.IOMMUEnabled {
 			return 1, true
@@ -151,16 +151,18 @@ func matchKernelModule(device Device, modules []string) (int, bool) {
 	return 0, false
 }
 
-// matchHugepages reports whether hugepages of at least the requested size are
-// reserved on the host.
-func matchHugepages(device Device, sizes []uint64) (int, bool) {
+// matchHugepages reports whether the host has a hugepage pool of the requested
+// size with at least the requested number of pages reserved. A minimum page
+// count may be omitted, in which case any reserved pool of the right size
+// matches.
+func matchHugepages(device Device, pools []Hugepage) (int, bool) {
 	sizeKiB, ok := parseSize(device.Size)
 	if !ok {
 		return 0, false
 	}
 
-	for _, present := range sizes {
-		if present == sizeKiB {
+	for _, pool := range pools {
+		if pool.SizeKiB == sizeKiB && pool.Reserved >= device.Num {
 			return 2, true
 		}
 	}
@@ -179,6 +181,10 @@ func deviceLabel(device Device) string {
 	case "kernel-module":
 		return fmt.Sprintf("kernel module %s", device.Name)
 	case "hugepages":
+		if device.Num > 0 {
+			return fmt.Sprintf("%d %s hugepages", device.Num, device.Size)
+		}
+
 		return fmt.Sprintf("%s hugepages", device.Size)
 	case "iommu":
 		return "IOMMU"

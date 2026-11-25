@@ -17,8 +17,8 @@ func kernelModuleRequirement(name string) Device {
 	return Device{Type: "kernel-module", Name: name}
 }
 
-func hugepagesRequirement(size string) Device {
-	return Device{Type: "hugepages", Size: size}
+func hugepagesRequirement(size string, num uint64) Device {
+	return Device{Type: "hugepages", Size: size, Num: num}
 }
 
 func iommuRequirement() Device {
@@ -30,7 +30,7 @@ func docaDevices() Devices {
 		cpuRequirement("amd64"),
 		pciRequirement("0x15b3"),
 		kernelModuleRequirement("mlx5_core"),
-		hugepagesRequirement("1G"),
+		hugepagesRequirement("2M", 4096),
 		iommuRequirement(),
 	}}
 }
@@ -40,7 +40,7 @@ func docaHardware() *Hardware {
 		Architecture:  "amd64",
 		PCIDevices:    []PCIDevice{{VendorID: 0x15b3, DeviceID: 0x1015, DeviceClass: 0x0200}},
 		KernelModules: []string{"mlx5_core"},
-		HugepageKiBs:  []uint64{1024 * 1024},
+		Hugepages:     []Hugepage{{SizeKiB: 2048, Reserved: 4096}},
 		IOMMUEnabled:  true,
 	}
 }
@@ -115,7 +115,7 @@ func TestScoreReportsMissingPrerequisites(t *testing.T) {
 
 	// Everything but hugepages and IOMMU is present.
 	hardware := docaHardware()
-	hardware.HugepageKiBs = nil
+	hardware.Hugepages = nil
 	hardware.IOMMUEnabled = false
 
 	match := Score(engine, hardware)
@@ -123,7 +123,7 @@ func TestScoreReportsMissingPrerequisites(t *testing.T) {
 		t.Fatal("expected engine to be incompatible with missing prerequisites")
 	}
 
-	want := []string{"1G hugepages", "IOMMU"}
+	want := []string{"4096 2M hugepages", "IOMMU"}
 
 	for _, missing := range want {
 		if !slices.Contains(match.Missing, missing) {
@@ -149,14 +149,18 @@ func TestMatchKernelModule(t *testing.T) {
 }
 
 func TestMatchHugepages(t *testing.T) {
-	device := hugepagesRequirement("1G")
+	device := hugepagesRequirement("2M", 4096)
 
-	if _, ok := matchDevice(device, &Hardware{HugepageKiBs: []uint64{1024 * 1024}}); !ok {
-		t.Fatal("expected 1G hugepages to match")
+	if _, ok := matchDevice(device, &Hardware{Hugepages: []Hugepage{{SizeKiB: 2048, Reserved: 4096}}}); !ok {
+		t.Fatal("expected 4096 2M hugepages to match")
 	}
 
-	if _, ok := matchDevice(device, &Hardware{HugepageKiBs: []uint64{2048}}); ok {
-		t.Fatal("expected 1G hugepages not to match 2M pages")
+	if _, ok := matchDevice(device, &Hardware{Hugepages: []Hugepage{{SizeKiB: 2048, Reserved: 4095}}}); ok {
+		t.Fatal("expected fewer than 4096 2M hugepages not to match")
+	}
+
+	if _, ok := matchDevice(device, &Hardware{Hugepages: []Hugepage{{SizeKiB: 1024 * 1024, Reserved: 4096}}}); ok {
+		t.Fatal("expected 1G hugepages not to match a 2M requirement")
 	}
 }
 
@@ -206,7 +210,7 @@ func dpuDevices() Devices {
 		cpuRequirement("arm64"),
 		pciRequirement("0x15b3"),
 		kernelModuleRequirement("mlx5_core"),
-		hugepagesRequirement("2M"),
+		hugepagesRequirement("2M", 4096),
 		iommuRequirement(),
 	}}
 }
@@ -216,7 +220,7 @@ func dpuHardware() *Hardware {
 		Architecture:  "arm64",
 		PCIDevices:    []PCIDevice{{VendorID: 0x15b3, DeviceID: 0xa2da, DeviceClass: 0x0604}},
 		KernelModules: []string{"mlx5_core"},
-		HugepageKiBs:  []uint64{2048},
+		Hugepages:     []Hugepage{{SizeKiB: 2048, Reserved: 4096}},
 		IOMMUEnabled:  true,
 	}
 }

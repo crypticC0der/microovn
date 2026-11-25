@@ -88,13 +88,17 @@ func TestScanHugepages(t *testing.T) {
 		"hugepages-2048kB/nr_hugepages":    {Data: []byte("0\n")},
 	}
 
-	sizes := scanHugepages(fsys)
-	if len(sizes) != 1 {
-		t.Fatalf("expected 1 reserved hugepage size, got %d (%v)", len(sizes), sizes)
+	pools := scanHugepages(fsys)
+	if len(pools) != 1 {
+		t.Fatalf("expected 1 reserved hugepage size, got %d (%v)", len(pools), pools)
 	}
 
-	if sizes[0] != 1024*1024 {
-		t.Fatalf("expected 1 GiB (%d KiB), got %d", 1024*1024, sizes[0])
+	if pools[0].SizeKiB != 1024*1024 {
+		t.Fatalf("expected 1 GiB (%d KiB), got %d", 1024*1024, pools[0].SizeKiB)
+	}
+
+	if pools[0].Reserved != 8 {
+		t.Fatalf("expected 8 reserved pages, got %d", pools[0].Reserved)
 	}
 }
 

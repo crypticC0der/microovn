@@ -12,6 +12,7 @@ devices:
       name: mlx5_core
     - type: hugepages
       size: 2M
+      num: 4096
     - type: iommu
 runtime: ovs-doca-dpu
 components:

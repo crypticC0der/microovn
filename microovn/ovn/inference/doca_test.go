@@ -19,7 +19,7 @@ func TestAssessDocaCapableButNotReady(t *testing.T) {
 	engines := []Engine{{Name: "ovs-doca", Devices: docaDevices()}}
 
 	hardware := docaHardware()
-	hardware.HugepageKiBs = nil
+	hardware.Hugepages = nil
 
 	readiness := AssessDoca(engines, hardware)
 	if !readiness.Capable {
@@ -94,7 +94,7 @@ func TestDocaDpuRequires2MHugepages(t *testing.T) {
 
 	// Without 2M hugepages the DPU engine is no longer ready.
 	hardware := dpuHardware()
-	hardware.HugepageKiBs = nil
+	hardware.Hugepages = nil
 	readiness := AssessDoca(engines, hardware)
 	if readiness.Ready {
 		t.Fatal("expected the DPU engine to be not-ready without 2M hugepages")

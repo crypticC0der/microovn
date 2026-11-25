@@ -27,13 +27,20 @@ type PCIDevice struct {
 	DeviceClass uint16
 }
 
+// Hugepage describes a single hugepage pool: its page size and the number of
+// pages reserved at boot.
+type Hugepage struct {
+	SizeKiB  uint64
+	Reserved uint64
+}
+
 // Hardware is a summary of the host hardware that is relevant to OVS engine
 // selection.
 type Hardware struct {
 	Architecture  string
 	PCIDevices    []PCIDevice
 	KernelModules []string
-	HugepageKiBs  []uint64
+	Hugepages     []Hugepage
 	IOMMUEnabled  bool
 }
 
@@ -76,7 +83,7 @@ func detect(fsys detectionFilesystems, arch string) (*Hardware, error) {
 		Architecture:  arch,
 		PCIDevices:    devices,
 		KernelModules: modules,
-		HugepageKiBs:  hugepages,
+		Hugepages:     hugepages,
 		IOMMUEnabled:  iommuEnabled(fsys.IOMMU),
 	}, nil
 }
@@ -149,18 +156,18 @@ func scanKernelModules(fsys fs.FS) []string {
 	return modules
 }
 
-// scanHugepages returns the sizes, in KiB, of every hugepage size that has at
-// least one page reserved, reading the /sys/kernel/mm/hugepages directory. A
-// size is only reported when the boot layer provisioned at least one page of
-// it; hugepage sizes with no pages reserved are omitted, as are directories
-// whose contents cannot be read.
-func scanHugepages(fsys fs.FS) []uint64 {
+// scanHugepages returns every hugepage pool that has at least one page
+// reserved, reading the /sys/kernel/mm/hugepages directory. Each pool records
+// its page size and the number of pages reserved at boot. Hugepage sizes with
+// no pages reserved are omitted, as are directories whose contents cannot be
+// read.
+func scanHugepages(fsys fs.FS) []Hugepage {
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return nil
 	}
 
-	sizes := make([]uint64, 0)
+	pools := make([]Hugepage, 0)
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -182,10 +189,10 @@ func scanHugepages(fsys fs.FS) []uint64 {
 			continue
 		}
 
-		sizes = append(sizes, sizeKiB)
+		pools = append(pools, Hugepage{SizeKiB: sizeKiB, Reserved: reserved})
 	}
 
-	return sizes
+	return pools
 }
 
 // parseHugepageDirName extracts the size in KiB from a hugepage directory name

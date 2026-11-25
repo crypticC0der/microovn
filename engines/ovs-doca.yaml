@@ -11,7 +11,8 @@ devices:
     - type: kernel-module
       name: mlx5_core
     - type: hugepages
-      size: 1G
+      size: 2M
+      num: 4096
     - type: iommu
 runtime: ovs-doca
 components:
