@@ -10,6 +10,8 @@ devices:
       vendor-id: "0x15b3"
     - type: kernel-module
       name: mlx5_core
+    - type: hugepages
+      size: 2M
     - type: iommu
 runtime: ovs-doca-dpu
 components:

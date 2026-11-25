@@ -206,6 +206,7 @@ func dpuDevices() Devices {
 		cpuRequirement("arm64"),
 		pciRequirement("0x15b3"),
 		kernelModuleRequirement("mlx5_core"),
+		hugepagesRequirement("2M"),
 		iommuRequirement(),
 	}}
 }
@@ -215,6 +216,7 @@ func dpuHardware() *Hardware {
 		Architecture:  "arm64",
 		PCIDevices:    []PCIDevice{{VendorID: 0x15b3, DeviceID: 0xa2da, DeviceClass: 0x0604}},
 		KernelModules: []string{"mlx5_core"},
+		HugepageKiBs:  []uint64{2048},
 		IOMMUEnabled:  true,
 	}
 }

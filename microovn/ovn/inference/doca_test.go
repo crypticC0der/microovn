@@ -76,24 +76,28 @@ func TestAssessDocaDpu(t *testing.T) {
 	}
 }
 
-func TestDocaDpuNoHugepagesRequired(t *testing.T) {
+func TestDocaDpuRequires2MHugepages(t *testing.T) {
 	engines := []Engine{
 		{Name: "ovs-doca", Devices: docaDevices()},
 		{Name: "ovs-doca-dpu", Devices: dpuDevices()},
 	}
 
-	// Arm64 DPU hardware with no hugepages reserved still selects the DPU
-	// engine, which does not require them.
-	hardware := dpuHardware()
-	hardware.HugepageKiBs = nil
-
-	engine, ok := findDocaEngine(engines, hardware)
+	// Arm64 DPU hardware with 2M hugepages reserved selects the DPU engine.
+	engine, ok := findDocaEngine(engines, dpuHardware())
 	if !ok {
 		t.Fatal("expected a DOCA engine to match the DPU hardware")
 	}
 
 	if engine.Name != "ovs-doca-dpu" {
 		t.Fatalf("expected the DPU engine, got %q", engine.Name)
+	}
+
+	// Without 2M hugepages the DPU engine is no longer ready.
+	hardware := dpuHardware()
+	hardware.HugepageKiBs = nil
+	readiness := AssessDoca(engines, hardware)
+	if readiness.Ready {
+		t.Fatal("expected the DPU engine to be not-ready without 2M hugepages")
 	}
 }
 
