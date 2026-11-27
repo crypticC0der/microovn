@@ -48,12 +48,24 @@ setup_file() {
     connect_container_to_network_no_ip "$BGP_PEER" "$BGP_INT_NET" "$BGP_CONTAINER_INT_IFACE"
     connect_container_to_network_no_ip "$TEST_CONTAINER" "$BGP_INT_NET" "$OVN_CONTAINER_INT_IFACE"
 
+    # A second shared L2 network used only by the hybrid test: the underlay
+    # fabric session (a separate host uplink from the attach provider port).
+    FABRIC_INT_NET="ovn-fab-net"
+    create_lxd_network_no_dhcp "$FABRIC_INT_NET"
+    BGP_FABRIC_INT_IFACE="eth2"
+    OVN_FABRIC_INT_IFACE="eth2"
+    connect_container_to_network_no_ip "$BGP_PEER" "$FABRIC_INT_NET" "$BGP_FABRIC_INT_IFACE"
+    connect_container_to_network_no_ip "$TEST_CONTAINER" "$FABRIC_INT_NET" "$OVN_FABRIC_INT_IFACE"
+
     install_frr_bgp $BGP_PEER
 
     export BGP_PEER
     export BGP_CONTAINER_INT_IFACE
     export OVN_CONTAINER_INT_IFACE
     export BGP_INT_NET
+    export BGP_FABRIC_INT_IFACE
+    export OVN_FABRIC_INT_IFACE
+    export FABRIC_INT_NET
 }
 
 teardown_file() {
@@ -61,4 +73,5 @@ teardown_file() {
     collect_coverage $TEST_CONTAINERS
     delete_containers "$TEST_CONTAINER $BGP_PEER"
     delete_lxd_network "$BGP_INT_NET"
+    delete_lxd_network "$FABRIC_INT_NET"
 }

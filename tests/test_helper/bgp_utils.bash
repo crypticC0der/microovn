@@ -79,6 +79,27 @@ EOF
     } | lxc_exec "$container" "vtysh"
 }
 
+# frr_send_ra CONTAINER IFACE PREFIX
+#
+# Make the FRR zebra send IPv6 Router Advertisements (with the given /64
+# prefix) on IFACE, so a BIRD node doing radv router-discovery can discover
+# this peer's link-local and actively connect. A real ToR advertises fabric
+# prefixes; BIRD's =router discovery= only turns a peer into a connectable
+# neighbor once it receives a real RA carrying a prefix.
+function frr_send_ra() {
+    local container=$1; shift
+    local iface=$1; shift
+    local prefix=$1; shift
+
+    lxc_exec "$container" "vtysh" <<EOF
+configure
+interface $iface
+ no ipv6 nd suppress-ra
+ ipv6 nd ra-interval 4
+ ipv6 nd prefix $prefix
+EOF
+}
+
 # frr_start_bgp_numbered CONTAINER ASN IFACE LOCAL_CIDR PEER_IP
 #
 # Assign LOCAL_CIDR (e.g. 10.0.0.2/30) to IFACE on the CONTAINER and start a
