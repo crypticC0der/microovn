@@ -101,6 +101,26 @@ attach_learn_table() {
         | tr -d '"' | tr -d '[:space:]'
 }
 
+# interconnect_bridge_exists CONTAINER — the MicroOVN interconnect bridge exists.
+interconnect_bridge_exists() {
+    local chassis=$1
+    lxc_exec "$chassis" "microovn.ovs-vsctl br-exists microovn-bgp-interconnect-bridge"
+}
+
+# interconnect_bridge_gone CONTAINER — the MicroOVN interconnect bridge was removed.
+interconnect_bridge_gone() {
+    local chassis=$1
+    ! lxc_exec "$chassis" "microovn.ovs-vsctl br-exists microovn-bgp-interconnect-bridge"
+}
+
+# interconnect_flows_installed CONTAINER — both cookie-scoped forwarding flows are
+# present on the interconnect bridge (provider->interconnect + interconnect->provider).
+interconnect_flows_installed() {
+    local chassis=$1
+    lxc_exec "$chassis" \
+        "test \"\$(microovn.ovs-ofctl dump-flows microovn-bgp-interconnect-bridge | grep -c 'cookie=0x6d6963726f706f63')\" = 2"
+}
+
 # attach_redirect_set CONTAINER LRP — routing-protocol-redirect is present.
 attach_redirect_set() {
     local container=$1; shift
@@ -225,6 +245,10 @@ bgp_attach_register_test_functions() {
         -- attach_external_router_import_filter
 
     bats_test_function \
+        --description "Wire the Neutron interconnect bridge and install its forwarding flows" \
+        -- attach_interconnect
+
+    bats_test_function \
         --description "Compose the underlay under an active attach in one BIRD daemon" \
         -- attach_external_router_with_underlay
 }
@@ -236,8 +260,9 @@ bgp_attach_register_test_functions() {
 # plumbing — microovn owns that in v2), stamps only the attach marker + peer (no
 # chassis-wide gate), then verifies MicroOVN provisions the plumbing and attaches
 # BIRD via routing-protocol-redirect, forms an eBGP session with the FRR peer and
-# learns the default route. It also proves the advertise-table default (== the
-# allocated learn-table). Finally it removes the attach marker and verifies clean
+# learns the default route. It also proves the advertise-table default (42, the
+# Neutron main-router convention; distinct from the learn-table). Finally it
+# removes the attach marker and verifies clean
 # detach, including restoration of the plumbing it owned.
 attach_external_router() {
     local chassis="$TEST_CONTAINER"
@@ -297,8 +322,10 @@ attach_external_router() {
     wait_until "attach_redirect_set $chassis $lrp" false 60
 
     # MicroOVN owns the dynamic-routing plumbing (v2): it enables dynamic-routing,
-    # allocates the vrf-id, and stamps maintain-vrf + the computed port-name.
+    # defaults the vrf-id (10, the Neutron chassis-router convention), and stamps
+    # maintain-vrf + the computed port-name.
     learn_table=$(attach_learn_table "$lr")
+    assert_equal "10" "$learn_table"
     port_name=$(attach_port_name "$lrp")
     run lxc_exec "$chassis" "microovn.ovn-nbctl get Logical_Router $lr options:dynamic-routing"
     assert_success
@@ -343,16 +370,18 @@ attach_external_router() {
     echo "# ($chassis) Waiting on default route learned into the OVN VRF" >&3
     wait_until "attach_default_route $chassis $learn_table" false 60
 
-    # Prove the advertise/export path with the DEFAULT advertise-table (== the
-    # learn-table): drop a chassis-local /32 with a kernel metric into the VRF
-    # table and assert BIRD advertises it to the FRR peer.
+    # Prove the advertise/export path with the DEFAULT advertise-table (42, the
+    # Neutron main-router convention): drop a chassis-local /32 with a kernel
+    # metric into the advertise table and assert BIRD advertises it to the FRR
+    # peer. This is distinct from the learn-table (the VRF the default lands in).
+    local advertise_table=42
     local advertised_ip=172.16.99.99
-    echo "# ($chassis) Writing $advertised_ip/32 into the VRF table $learn_table" >&3
-    lxc_exec "$chassis" "ip route add $advertised_ip/32 dev lo table $learn_table metric 50"
+    echo "# ($chassis) Writing $advertised_ip/32 into advertise table $advertise_table" >&3
+    lxc_exec "$chassis" "ip route add $advertised_ip/32 dev lo table $advertise_table metric 50"
 
     echo "# ($BGP_PEER) Waiting to receive $advertised_ip/32 over BGP" >&3
     wait_until "container_has_ipv4_route $BGP_PEER $advertised_ip $BGP_CONTAINER_INT_IFACE" false 60
-    lxc_exec "$chassis" "ip route del $advertised_ip/32 table $learn_table"
+    lxc_exec "$chassis" "ip route del $advertised_ip/32 table $advertise_table"
 
     echo "# ($chassis) Removing the attach marker to detach" >&3
     lxc_exec "$chassis" "microovn.ovn-nbctl remove Logical_Router_Port $lrp external_ids microovn-bgp-attach"
@@ -394,8 +423,8 @@ attach_external_router() {
 # address (10.0.0.2) inside that network. Verifies the numbered path end-to-end:
 # microovn provisions the plumbing, the veth gets exactly one IPv4, BGP
 # establishes, BFD comes up against the IPv4 neighbour, the default is learned via
-# an IPv4 next hop, the advertised /32 (default advertise-table == learn-table)
-# reaches FRR, and detach restores the plumbing.
+# an IPv4 next hop, the advertised /32 (default advertise-table 42, distinct
+# from the learn-table) reaches FRR, and detach restores the plumbing.
 attach_external_router_numbered() {
     local chassis="$TEST_CONTAINER"
     local tor_asn=4200000100
@@ -448,8 +477,10 @@ attach_external_router_numbered() {
     echo "# ($chassis) Waiting for the reconciler to attach (next 30s tick)" >&3
     wait_until "attach_redirect_set $chassis $lrp" false 60
 
-    # MicroOVN owns the plumbing; discover the allocated learn-table + port-name.
+    # MicroOVN owns the plumbing; discover the learn-table (defaults to 10) +
+    # compute the port-name.
     learn_table=$(attach_learn_table "$lr")
+    assert_equal "10" "$learn_table"
     port_name=$(attach_port_name "$lrp")
 
     # routing-protocols must be exactly BGP,BFD while attached.
@@ -478,14 +509,16 @@ attach_external_router_numbered() {
     wait_until "attach_default_route_via $chassis $learn_table $transit_peer" false 60
 
     # Prove the advertise/export path over the numbered uplink with the DEFAULT
-    # advertise-table (== the learn-table).
+    # advertise-table (42, the Neutron main-router convention; distinct from the
+    # learn-table).
+    local advertise_table=42
     local advertised_ip=172.16.99.99
-    echo "# ($chassis) Writing $advertised_ip/32 into the VRF table $learn_table" >&3
-    lxc_exec "$chassis" "ip route add $advertised_ip/32 dev lo table $learn_table metric 50"
+    echo "# ($chassis) Writing $advertised_ip/32 into advertise table $advertise_table" >&3
+    lxc_exec "$chassis" "ip route add $advertised_ip/32 dev lo table $advertise_table metric 50"
 
     echo "# ($BGP_PEER) Waiting to receive $advertised_ip/32 over BGP" >&3
     wait_until "container_has_ipv4_route $BGP_PEER $advertised_ip $BGP_CONTAINER_INT_IFACE" false 60
-    lxc_exec "$chassis" "ip route del $advertised_ip/32 table $learn_table"
+    lxc_exec "$chassis" "ip route del $advertised_ip/32 table $advertise_table"
 
     echo "# ($chassis) Removing the attach marker to detach" >&3
     lxc_exec "$chassis" "microovn.ovn-nbctl remove Logical_Router_Port $lrp external_ids microovn-bgp-attach"
@@ -581,9 +614,10 @@ attach_external_router_import_filter() {
     echo "# ($chassis) Waiting for the reconciler to attach (next 30s tick)" >&3
     wait_until "attach_redirect_set $chassis $lrp" false 60
 
-    # MicroOVN allocates the learn-table (vrf-id) even when the advertise-table
-    # is overridden to a distinct value.
+    # MicroOVN defaults the learn-table (vrf-id) to 10 even when the
+    # advertise-table is overridden to a distinct value.
     learn_table=$(attach_learn_table "$lr")
+    assert_equal "10" "$learn_table"
 
     # The rendered attach BIRD config must carry the subnet-inclusive (`+=`)
     # import filter for the listed aggregate.
@@ -724,6 +758,126 @@ attach_external_router_with_underlay() {
     # the underlay session stays up.
     wait_until "attach_bird_config_underlay_only $chassis" false 30
     wait_until "attach_protocol_established $chassis underlay_0_peer_1" false 60
+}
+
+# attach_interconnect
+#
+# Simulates the Neutron Core OVN BGP interconnect topology (flat provider
+# network, interconnect switch, bgp-lr-main) alongside the standard attach
+# fixture, on a provider physnet distinct from the attach uplink. Verifies
+# MicroOVN creates the NIC-less microovn-bgp-interconnect-bridge, registers it in
+# ovn-bridge-mappings under the provider physnet, installs the two cookie-scoped
+# forwarding flows once both localnet patch ports are ready, and tears it all
+# down on marker removal.
+attach_interconnect() {
+    local chassis="$TEST_CONTAINER"
+    local tor_asn=4200000100
+    local host_asn=4210000001
+    local router_id=192.0.2.1
+    local physnet=extnet
+    local provider_physnet=provnet1
+    local bridge=br-bgp
+    local lr=lr-ext
+    local ls=ls-ext
+    local lrp=lrp-ext
+    local provider_switch=neutron-5a5a5a5a
+    local provider_localnet=provnet-5a5a5a5a
+    local ic_switch=bgp-ls-interconnect-neutron-5a5a5a5a
+    local ic_localnet=bgp-lsp-bgp-ls-interconnect-neutron-5a5a5a5a-localnet
+    local ic_lrp=bgp-lrp-bgp-lr-main-to-bgp-ls-interconnect-neutron-5a5a5a5a
+    local ic_mac=02:00:00:00:00:01
+    local provider_lrp=bgp-lrp-bgp-lr-main-to-neutron-5a5a5a5a
+    local provider_lsp=bgp-lsp-neutron-5a5a5a5a-to-bgp-lr-main
+
+    # Start the FRR peer on the ToR interface (unnumbered).
+    echo "# Starting BGP on $BGP_PEER" >&3
+    lxc_exec "$BGP_PEER" "ip link set $BGP_CONTAINER_INT_IFACE up"
+    wait_until "attach_peer_link_local_is_set $BGP_PEER $BGP_CONTAINER_INT_IFACE" false 30
+    frr_start_bgp_unnumbered "$BGP_PEER" "$tor_asn" "$BGP_CONTAINER_INT_IFACE"
+    local peer_ll
+    peer_ll=$(attach_peer_link_local "$BGP_PEER" "$BGP_CONTAINER_INT_IFACE")
+
+    echo "# ($chassis) Creating owner peer bridge + attach topology" >&3
+    lxc_exec "$chassis" "microovn.ovs-vsctl add-br $bridge"
+    lxc_exec "$chassis" "microovn.ovs-vsctl add-port $bridge $OVN_CONTAINER_INT_IFACE"
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=$physnet:$bridge"
+
+    lxc_exec "$chassis" \
+        "microovn.ovn-nbctl \
+            lr-add $lr \
+            -- set Logical_Router $lr options:chassis=$chassis \
+            -- lrp-add $lr $lrp 02:00:00:00:00:02 \
+            -- ls-add $ls \
+            -- lsp-add $ls lsp-$lr \
+            -- lsp-set-type lsp-$lr router \
+            -- lsp-set-options lsp-$lr router-port=$lrp \
+            -- lsp-set-addresses lsp-$lr router \
+            -- lsp-add $ls lsp-$ls-localnet \
+            -- lsp-set-type lsp-$ls-localnet localnet \
+            -- lsp-set-options lsp-$ls-localnet network_name=$physnet \
+            -- lsp-set-addresses lsp-$ls-localnet unknown"
+
+    echo "# ($chassis) Creating the Neutron interconnect topology ($provider_physnet)" >&3
+    lxc_exec "$chassis" \
+        "microovn.ovn-nbctl \
+            ls-add $provider_switch \
+            -- set Logical_Switch $provider_switch external_ids:neutron\\\\:provnet-network-type=flat \
+            -- lsp-add $provider_switch $provider_localnet \
+            -- lsp-set-type $provider_localnet localnet \
+            -- lsp-set-options $provider_localnet network_name=$provider_physnet \
+            -- lsp-set-addresses $provider_localnet unknown \
+            -- ls-add $ic_switch \
+            -- lsp-add $ic_switch $ic_localnet \
+            -- lsp-set-type $ic_localnet localnet \
+            -- lsp-set-options $ic_localnet network_name=$provider_physnet \
+            -- lsp-set-addresses $ic_localnet unknown \
+            -- lr-add bgp-lr-main \
+            -- set Logical_Router bgp-lr-main options:chassis=$chassis \
+            -- lrp-add bgp-lr-main $provider_lrp 02:00:00:00:00:03 \
+            -- lsp-add $provider_switch $provider_lsp \
+            -- lsp-set-type $provider_lsp router \
+            -- lsp-set-options $provider_lsp router-port=$provider_lrp \
+            -- lsp-set-addresses $provider_lsp router \
+            -- lrp-add bgp-lr-main $ic_lrp $ic_mac \
+            -- lsp-add $ic_switch bgp-lsp-$ic_switch-to-bgp-lr-main \
+            -- lsp-set-type bgp-lsp-$ic_switch-to-bgp-lr-main router \
+            -- lsp-set-options bgp-lsp-$ic_switch-to-bgp-lr-main router-port=$ic_lrp \
+            -- lsp-set-addresses bgp-lsp-$ic_switch-to-bgp-lr-main router"
+
+    echo "# ($chassis) Stamping attach markers and peers" >&3
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:microovn-bgp-asn=$host_asn"
+    lxc_exec "$chassis" "microovn.ovs-vsctl set Open_vSwitch . external-ids:microovn-bgp-router-id=$router_id"
+    lxc_exec "$chassis" "microovn.ovn-nbctl set Logical_Router_Port $lrp external_ids:microovn-bgp-attach=true"
+    lxc_exec "$chassis" "microovn.ovn-nbctl set Logical_Router_Port $lrp external_ids:microovn-bgp-peers=$tor_asn@$peer_ll"
+
+    echo "# ($chassis) Waiting for the interconnect bridge" >&3
+    wait_until "interconnect_bridge_exists $chassis" false 60
+
+    # The mapping must carry the provider physnet -> interconnect bridge entry
+    # (the owner's unrelated entries are preserved).
+    run lxc_exec "$chassis" "microovn.ovs-vsctl get Open_vSwitch . external-ids:ovn-bridge-mappings"
+    assert_success
+    assert_output --partial "$provider_physnet:microovn-bgp-interconnect-bridge"
+    assert_output --partial "$physnet:$bridge"
+
+    echo "# ($chassis) Waiting for the two interconnect flows" >&3
+    wait_until "interconnect_flows_installed $chassis" false 60
+
+    # provider->interconnect rewrites dst to bgp-lr-main's interconnect MAC.
+    run lxc_exec "$chassis" "microovn.ovs-ofctl dump-flows microovn-bgp-interconnect-bridge"
+    assert_success
+    assert_output --partial "mod_dl_dst:$ic_mac"
+
+    echo "# ($chassis) Removing the attach marker to detach (interconnect torn down)" >&3
+    lxc_exec "$chassis" "microovn.ovn-nbctl remove Logical_Router_Port $lrp external_ids microovn-bgp-attach"
+    wait_until "interconnect_bridge_gone $chassis" false 60
+
+    # Leave the topology clean for the next test.
+    lxc_exec "$chassis" "microovn.ovn-nbctl ls-del $ls || true; microovn.ovn-nbctl lr-del $lr || true; \
+        microovn.ovn-nbctl lr-del bgp-lr-main || true; \
+        microovn.ovn-nbctl ls-del $ic_switch || true; \
+        microovn.ovn-nbctl ls-del $provider_switch || true" || true
+    lxc_exec "$chassis" "microovn.ovs-vsctl del-br $bridge" || true
 }
 
 bgp_attach_register_test_functions

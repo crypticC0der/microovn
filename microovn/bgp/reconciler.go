@@ -68,6 +68,12 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 		return nil
 	}
 	if managed {
+		// Managed BGP and attach are mutually exclusive. A node that switched
+		// modes keeps no interconnect bridge (an attach-only resource), so tear
+		// any stale one down alongside skipping attach. Idempotent and cheap.
+		if err := teardownInterconnect(ctx, s); err != nil {
+			logger.Warnf("Failed to tear down interconnect: %v", err)
+		}
 		return nil
 	}
 
@@ -114,8 +120,17 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 		// survives an NB/leader-election blip. The idle gate-on/marker-free
 		// state stays quiet (no snapd churn, no `setup bird` clobber).
 		noLocal := len(tagged) == len(foreign)
-		if noLocal && (detachedAny || birdConfigIsAttach()) {
-			return stopAndResetBird(ctx, s)
+		if noLocal {
+			// The interconnect only exists to serve an active attach on this
+			// chassis. Tear it down with BIRD once no local target remains, so
+			// a topology owner deleting the flat provider network leaves nothing
+			// stale behind. Idempotent; cheap when nothing was created.
+			if err := teardownInterconnect(ctx, s); err != nil {
+				logger.Warnf("Failed to tear down interconnect: %v", err)
+			}
+			if detachedAny || birdConfigIsAttach() {
+				return stopAndResetBird(ctx, s)
+			}
 		}
 		return nil
 	}
@@ -149,18 +164,18 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 
 	// v2 collapses to a single VRF per chassis: every target shares one
 	// learn-table. A router with an owner-set vrf-id (or an already-enabled
-	// dynamic-routing tunnel_key) pins it; otherwise microovn allocates a
-	// chassis-local id.
+	// dynamic-routing tunnel_key) pins it; otherwise microovn defaults to the
+	// Neutron chassis-router convention (10).
 	learn, err := resolveChassisLearnTable(ctx, s, targets)
 	if err != nil {
 		return err
 	}
 
-	// advertise-table defaults to the learn-table (the producer writes FIP /32s
-	// into the VRF microovn allocated); the owner may set a distinct table via
-	// microovn-bgp-advertise-table only if they want a separate producer table.
+	// advertise-table defaults to the Neutron main-router convention (42), the
+	// kernel table the FIP producer writes /32s into. The owner may pin a
+	// distinct table via microovn-bgp-advertise-table.
 	if advertise == 0 {
-		advertise = learn
+		advertise = defaultAdvertiseTable
 	}
 
 	if routerID == "" {
@@ -259,7 +274,17 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 
 	reg := cfg
 	reg.Targets = converged
-	return writeBirdConfig(ctx, s, reg)
+	if err := writeBirdConfig(ctx, s, reg); err != nil {
+		return err
+	}
+
+	// Bring the fabric-facing interconnect bridge and its forwarding rules in
+	// line once attach is active. Failures are logged, not fatal: BIRD and the
+	// attach datapath already converged, and this will retry next tick.
+	if err := reconcileInterconnect(ctx, s); err != nil {
+		logger.Warnf("Failed to reconcile interconnect: %v", err)
+	}
+	return nil
 }
 
 // stopAndResetBird stops BIRD and resets its config so a stopped daemon isn't

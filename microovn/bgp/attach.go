@@ -53,6 +53,17 @@ const (
 	attachImportKey    = "microovn-bgp-import-filter"
 )
 
+// attach table-id defaults. Neutron convention: the chassis router learn-table
+// is VRF id 10 and the main router advertise-table is VRF id 42 (Neutron's
+// get_chassis_router_vrf_id / get_main_router_vrf_id). MicroOVN adopts these so
+// the producer table and its own tables match with zero per-node configuration.
+// Both remain owner-overridable via the microovn-bgp-advertise-table knob and
+// an owner-set options:dynamic-routing-vrf-id.
+const (
+	defaultLearnTable     uint32 = 10
+	defaultAdvertiseTable uint32 = 42
+)
+
 // Open_vSwitch external-id key prefixes used to remember the owner's pre-attach
 // Logical_Router_Port option values, so detach can restore them instead of
 // deleting an externally owned router's configuration. The full key is the
@@ -1018,27 +1029,13 @@ func knownLearnTable(ctx context.Context, s microTypes.State, router string) (ui
 	return 0, false, nil
 }
 
-// allocateLearnTable picks a chassis-local VRF table id for the shared
-// learn-table. It scans the kernel's in-use routing/VRF tables so the chosen id
-// does not collide with an existing VRF.
-func allocateLearnTable(ctx context.Context, s microTypes.State) (uint32, error) {
-	idStr, err := findAvailableVrfTableID(ctx, s)
-	if err != nil {
-		return 0, err
-	}
-	id, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil || id == 0 {
-		return 0, fmt.Errorf("invalid auto-selected VRF table id %q", idStr)
-	}
-	return uint32(id), nil
-}
-
 // resolveChassisLearnTable resolves the single learn-table id for this chassis's
 // attachments. v2 keeps the single-VRF-per-chassis model: every target must end
 // up on the same table. A router with an owner-set vrf-id (or an already-enabled
-// dynamic-routing tunnel_key) pins the value; a router with neither adopts that
-// same value (microovn provisions it). If none determine it, microovn allocates
-// one. Conflicting deterministic values are an error.
+// dynamic-routing tunnel_key) pins the value; a router with neither adopts the
+// same value (microovn provisions the default). If none determine it, microovn
+// defaults to the Neutron chassis-router convention (10). Conflicting
+// deterministic values are an error.
 func resolveChassisLearnTable(ctx context.Context, s microTypes.State, targets []attachTarget) (uint32, error) {
 	var learn uint32
 	for _, t := range targets {
@@ -1058,7 +1055,7 @@ func resolveChassisLearnTable(ctx context.Context, s microTypes.State, targets [
 	if learn != 0 {
 		return learn, nil
 	}
-	return allocateLearnTable(ctx, s)
+	return defaultLearnTable, nil
 }
 
 // datapathTunnelKey looks up the Datapath_Binding.tunnel_key for a logical
