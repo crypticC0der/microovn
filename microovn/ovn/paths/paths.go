@@ -167,6 +167,13 @@ func BirdConfigFile() string {
 	return filepath.Join(BirdConfigDir(), "bird.conf")
 }
 
+// UnderlayConfigFile returns path to the structured host/fabric underlay config
+// (the `microovn enable bird` JSON record), read back by the attach reconciler
+// for hybrid composition and by teardown for underlay-aware reset.
+func UnderlayConfigFile() string {
+	return filepath.Join(BirdConfigDir(), "underlay.json")
+}
+
 // getServiceCertFiles returns path to certificate and key of give service in format
 // "<base_dir>/<service_name>-{cert,privkey}.pem"
 func getServiceCertFiles(service string) (string, string) {

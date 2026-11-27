@@ -38,6 +38,13 @@ var BgpBirdEndpoint = microTypes.Endpoint{
 	Post: microTypes.EndpointAction{Handler: setupBirdHandler, AllowUntrusted: false, ProxyTarget: true},
 }
 
+// BgpEnableBirdEndpoint applies the structured underlay configuration
+// (`microovn enable bird`). Node-local and fire-and-forget.
+var BgpEnableBirdEndpoint = microTypes.Endpoint{
+	Path: "bgp/enable-bird",
+	Post: microTypes.EndpointAction{Handler: enableBirdHandler, AllowUntrusted: false, ProxyTarget: true},
+}
+
 func setupBgpHandler(s microTypes.State, r *http.Request) microTypes.Response {
 	resp := types.SetupBgpResponse{}
 
@@ -195,6 +202,32 @@ func setupBirdHandler(s microTypes.State, r *http.Request) microTypes.Response {
 
 	resp.Success = true
 	resp.Message = "BIRD configuration applied"
+	return microTypes.SyncResponse(true, &resp)
+}
+
+func enableBirdHandler(s microTypes.State, r *http.Request) microTypes.Response {
+	resp := types.EnableBirdResponse{}
+
+	if !microTypes.IsNotification(r) {
+		var req types.EnableBirdRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return microTypes.BadRequest(errors.New("failed to decode request body"))
+		}
+
+		if strings.TrimSpace(req.Raw) != "" {
+			if err := bgp.SetupBirdConfig(r.Context(), s, req.Raw); err != nil {
+				return microTypes.SmartError(fmt.Errorf("failed to apply raw BIRD configuration: %w", err))
+			}
+			resp.Message = "BIRD configuration applied"
+		} else {
+			if err := bgp.EnableBird(r.Context(), s, req.Uplinks, req.Config); err != nil {
+				return microTypes.SmartError(fmt.Errorf("failed to enable underlay BIRD: %w", err))
+			}
+			resp.Message = "Underlay BIRD enabled"
+		}
+	}
+
+	resp.Success = true
 	return microTypes.SyncResponse(true, &resp)
 }
 

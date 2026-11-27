@@ -419,6 +419,30 @@ introduced, which attach anchors its VRF-id provisioning on.
    per-``Logical_Router_Port`` ``microovn-bgp-attach`` marker (there is no
    chassis-wide enable gate).
 
+Underlay (``enable bird``)
+--------------------------
+
+A node may also need to advertise its own underlay addresses (control-plane,
+GENEVE, storage loopbacks) to the fabric, independently of managed or attach
+mode. ``microovn enable bird`` turns this into a structured mode:
+
+.. code-block:: none
+
+   microovn enable bird \
+     --uplink dpu1p1.100 --uplink dpu2p1.100 \
+     --config asn=4200000006 --config router_id=0.0.0.6 --config ula=fd2b:5d1a:7c93::/48
+
+Only the uplink interfaces are required; the other scalars are defaulted from the
+node name. The node is the *active* speaker: it discovers the ToR's link-local
+address from the ToR's Router Advertisements and brings up an unnumbered IPv6
+eBGP session per uplink, advertising the node's own loopback ``/128`` routes.
+``--stdin`` applies a raw BIRD configuration instead (the former ``setup bird``).
+
+The config is stored at ``$SNAP_COMMON/data/bird/underlay.json``. There is no
+``disable bird`` in the current release: to remove the underlay, delete that file
+and stop/restart ``microovn.bird``. Raw ``setup bird``/``--stdin`` requires an
+OVS/OVN-capable node (it refuses while attach or an underlay is active).
+
 Disable BGP integration
 -----------------------
 
@@ -429,8 +453,8 @@ To disable BGP integration, simply run:
    microovn disable bgp
 
 This will remove all VRF tables, virtual interfaces, OVS bridges, Logical
-Switches and Logical Routers that were created when the integration was
-enabled.
+Switches and Logical Routers that were created when the managed BGP integration
+was enabled.
 
 MicroOVN will also backup and reset BIRD startup configuration. The current
 configuration file will be backed up in the same directory under name

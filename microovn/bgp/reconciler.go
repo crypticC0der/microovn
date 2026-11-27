@@ -115,7 +115,7 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 		// state stays quiet (no snapd churn, no `setup bird` clobber).
 		noLocal := len(tagged) == len(foreign)
 		if noLocal && (detachedAny || birdConfigIsAttach()) {
-			return stopAndResetBird(ctx)
+			return stopAndResetBird(ctx, s)
 		}
 		return nil
 	}
@@ -187,6 +187,14 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 		Targets:        targets,
 	}
 
+	// Compose the structured underlay (if one is persisted) under the attach
+	// render, so a hybrid node runs both roles in one BIRD daemon.
+	if underlay, ok, err := readUnderlayConfig(); err != nil {
+		return err
+	} else if ok {
+		cfg.Underlay = &underlay
+	}
+
 	// Attach or re-attach each desired target. Preflight runs only for targets we
 	// don't yet own; every target (owned or not) is then passed through the
 	// idempotent attachUplink, which verifies-and-repairs so a partially failed
@@ -255,12 +263,21 @@ func ReconcileAttach(ctx context.Context, s microTypes.State) error {
 }
 
 // stopAndResetBird stops BIRD and resets its config so a stopped daemon isn't
-// left with a config that references removed veths. The config is only reset
-// after a successful stop: if the stop fails, the attach-generated config (and
-// its marker) stays in place so the next tick can retry the teardown via
-// birdConfigIsAttach rather than silently leaving BIRD running on a default
-// config.
-func stopAndResetBird(ctx context.Context) error {
+// left with a config that references removed veths. On a hybrid node with a
+// persisted underlay it instead keeps BIRD running and re-renders the
+// underlay-only config (dropping just the attach half). The attach config is
+// only reset after a successful stop: if the stop fails, the attach-generated
+// config (and its marker) stays in place so the next tick can retry the
+// teardown via birdConfigIsAttach rather than silently leaving BIRD running on
+// a default config.
+func stopAndResetBird(ctx context.Context, s microTypes.State) error {
+	if uc, ok, err := readUnderlayConfig(); err != nil {
+		return err
+	} else if ok {
+		// Hybrid teardown: the underlay session is still wanted, so re-render it
+		// in place of the attach config rather than stopping BIRD.
+		return applyBirdConfig(ctx, s, renderUnderlay(uc))
+	}
 	if err := snap.Stop(ctx, BirdService, true); err != nil {
 		logger.Warnf("Failed to stop BIRD: %v", err)
 		return err

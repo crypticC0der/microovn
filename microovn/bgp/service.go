@@ -138,6 +138,12 @@ func EnableService(ctx context.Context, s microTypes.State, extraConfig *types.E
 		return errors.New("BGP attach mode is active; disable it before enabling managed BGP")
 	}
 
+	if _, ok, err := readUnderlayConfig(); err != nil {
+		return fmt.Errorf("failed to check whether an underlay is active: %w", err)
+	} else if ok {
+		return errors.New("underlay BIRD is active; remove the underlay config before enabling managed BGP")
+	}
+
 	err = snap.Start(ctx, BirdService, true)
 	if err != nil {
 		logging.Errorf("Failed to start %s service: %s", BirdService, err)
@@ -291,6 +297,12 @@ func SetupBirdConfig(ctx context.Context, s microTypes.State, rawConfig string) 
 	}
 	if attachActive {
 		return errors.New("BGP attach mode is active; configure BIRD via the attach markers instead of setup bird")
+	}
+
+	if _, ok, err := readUnderlayConfig(); err != nil {
+		return fmt.Errorf("failed to check whether an underlay is active: %w", err)
+	} else if ok {
+		return errors.New("underlay BIRD is active; remove the underlay config before applying a raw BIRD configuration")
 	}
 
 	return applyBirdConfig(ctx, s, rawConfig)

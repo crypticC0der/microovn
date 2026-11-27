@@ -334,3 +334,15 @@ func SetupBird(ctx context.Context, c microTypes.Client, request types.SetupBird
 
 	return responseData, err
 }
+
+// EnableBird applies the structured underlay configuration (`microovn enable
+// bird`), or a raw BIRD config when request.Raw is set.
+func EnableBird(ctx context.Context, c microTypes.Client, request types.EnableBirdRequest) (types.EnableBirdResponse, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, time.Second*30)
+	defer cancel()
+
+	responseData := types.EnableBirdResponse{}
+	err := c.Query(queryCtx, "POST", types.APIVersion, &url.URL{Path: "bgp/enable-bird"}, request, &responseData)
+
+	return responseData, err
+}

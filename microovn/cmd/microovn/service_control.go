@@ -103,6 +103,13 @@ func (c *cmdEnable) Command() *cobra.Command {
 		"Optional name of the node to target",
 	)
 
+	// The underlay mode is its own dedicated command (not a microcluster
+	// service), registered as a child so `enable bird` and `enable <SERVICE>`
+	// coexist (cobra dispatches to the child before the parent's OnlyValidArgs
+	// check).
+	var enableBirdCmd = cmdEnableBird{common: c.common}
+	cmd.AddCommand(enableBirdCmd.Command())
+
 	return cmd
 }
 
