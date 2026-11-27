@@ -11,6 +11,13 @@ description: |-
 
 confinement: strict
 
+# Pull OVN 26.03.3 (+ patched OVS 3.7.1) from gboutry's resolute-ovn-v2 PPA
+# (LP #2169282) so the snap gains /31 numbered BGP router-port support
+# (OVN >= 26.03.3) on the core26 (resolute) base.
+package-repositories:
+  - type: apt
+    ppa: gboutry/resolute-ovn-v2
+
 slots:
   ovn-certificates:
     interface: content
